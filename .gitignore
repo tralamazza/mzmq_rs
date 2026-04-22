@@ -1,0 +1,8 @@
+target/
+
+# Python
+*.egg-info/
+__pycache__/
+*.pyc
+.venv/
+.uv-cache/

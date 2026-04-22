@@ -1,0 +1,149 @@
+/// Fixed size of a ZMTP 3.1 greeting frame in bytes.
+pub const GREETING_LEN: usize = 64;
+
+const SIG0: usize = 0;
+const SIG9: usize = 9;
+const VERSION_MAJOR: usize = 10;
+const VERSION_MINOR: usize = 11;
+const MECHANISM: usize = 12;
+const AS_SERVER: usize = 32;
+
+/// Decoded peer greeting (subset relevant to this library).
+#[derive(Debug, PartialEq)]
+pub struct PeerGreeting {
+    /// Peer's ZMTP minor version (e.g. `0` for 3.0, `1` for 3.1).
+    pub version_minor: u8,
+}
+
+/// Errors returned when parsing a peer greeting.
+#[derive(Debug, PartialEq)]
+pub enum GreetingError {
+    InvalidSignature,
+    UnsupportedVersionMajor,
+    UnsupportedMechanism,
+    InvalidAsServer,
+}
+
+/// Writes the 64-byte ZMTP 3.1 NULL greeting for a PUB socket into `buf`.
+pub fn encode_greeting(buf: &mut [u8; GREETING_LEN]) {
+    *buf = [0u8; GREETING_LEN];
+    buf[SIG0] = 0xFF;
+    buf[SIG9] = 0x7F;
+    buf[VERSION_MAJOR] = 0x03;
+    buf[VERSION_MINOR] = 0x01; // ZMTP 3.1
+    buf[MECHANISM..MECHANISM + 4].copy_from_slice(b"NULL");
+    // AS_SERVER and 31-byte filler remain 0x00
+}
+
+/// Parses a 64-byte greeting from a peer. Returns the peer's version minor.
+pub fn parse_greeting(buf: &[u8; GREETING_LEN]) -> Result<PeerGreeting, GreetingError> {
+    if buf[SIG0] != 0xFF || buf[SIG9] != 0x7F {
+        return Err(GreetingError::InvalidSignature);
+    }
+    if buf[VERSION_MAJOR] != 0x03 {
+        return Err(GreetingError::UnsupportedVersionMajor);
+    }
+    if &buf[MECHANISM..MECHANISM + 4] != b"NULL" {
+        return Err(GreetingError::UnsupportedMechanism);
+    }
+    if buf[AS_SERVER] != 0x00 {
+        return Err(GreetingError::InvalidAsServer);
+    }
+    Ok(PeerGreeting {
+        version_minor: buf[VERSION_MINOR],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_sub_greeting() -> [u8; GREETING_LEN] {
+        let mut g = [0u8; GREETING_LEN];
+        g[0] = 0xFF;
+        g[9] = 0x7F;
+        g[10] = 0x03;
+        g[11] = 0x01; // ZMTP 3.1
+        g[12] = b'N';
+        g[13] = b'U';
+        g[14] = b'L';
+        g[15] = b'L';
+        g
+    }
+
+    #[test]
+    fn emits_64_byte_null_pub_greeting() {
+        let mut buf = [0u8; GREETING_LEN];
+        encode_greeting(&mut buf);
+        assert_eq!(buf[0], 0xFF);
+        assert_eq!(buf[1..9], [0u8; 8]); // padding
+        assert_eq!(buf[9], 0x7F);
+        assert_eq!(buf[10], 0x03); // major
+        assert_eq!(buf[11], 0x01); // minor = ZMTP 3.1
+        assert_eq!(&buf[12..16], b"NULL");
+        assert!(buf[16..32].iter().all(|&b| b == 0)); // mechanism padding
+        assert_eq!(buf[32], 0x00); // as-server
+        assert!(buf[33..64].iter().all(|&b| b == 0)); // filler
+    }
+
+    #[test]
+    fn accepts_valid_greeting_version_minor_1() {
+        let g = valid_sub_greeting();
+        assert_eq!(
+            parse_greeting(&g),
+            Ok(PeerGreeting {
+                version_minor: 0x01
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_version_minor_0() {
+        let mut g = valid_sub_greeting();
+        g[11] = 0x00;
+        assert_eq!(
+            parse_greeting(&g),
+            Ok(PeerGreeting {
+                version_minor: 0x00
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_signature_first_byte() {
+        let mut g = valid_sub_greeting();
+        g[0] = 0xFE;
+        assert_eq!(parse_greeting(&g), Err(GreetingError::InvalidSignature));
+    }
+
+    #[test]
+    fn rejects_wrong_signature_tenth_byte() {
+        let mut g = valid_sub_greeting();
+        g[9] = 0x00;
+        assert_eq!(parse_greeting(&g), Err(GreetingError::InvalidSignature));
+    }
+
+    #[test]
+    fn rejects_wrong_version_major() {
+        let mut g = valid_sub_greeting();
+        g[10] = 0x02;
+        assert_eq!(
+            parse_greeting(&g),
+            Err(GreetingError::UnsupportedVersionMajor)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_mechanism() {
+        let mut g = valid_sub_greeting();
+        g[12] = b'C'; // "CURVE..."
+        assert_eq!(parse_greeting(&g), Err(GreetingError::UnsupportedMechanism));
+    }
+
+    #[test]
+    fn rejects_nonzero_as_server() {
+        let mut g = valid_sub_greeting();
+        g[32] = 0x01;
+        assert_eq!(parse_greeting(&g), Err(GreetingError::InvalidAsServer));
+    }
+}

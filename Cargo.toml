@@ -1,0 +1,29 @@
+[package]
+name = "mzmq"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Minimal no_std ZMQ (ZMTP 3.1) PUB transport for embedded"
+
+[features]
+default = ["std", "sync"]
+std = []
+sync = ["dep:embedded-io"]
+async = ["dep:embedded-io-async"]
+alloc = []
+alloc-for-tests = ["alloc"]
+python-tests = []
+
+[dependencies]
+heapless = "0.8"
+embedded-io = { version = "0.7", optional = true }
+embedded-io-async = { version = "0.7", optional = true }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+wait-timeout = "0.2"
+hex = "0.4"
+embedded-io-adapters = { version = "0.7", features = ["std"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util"] }
