@@ -120,7 +120,15 @@ where
                         break;
                     }
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if *self.conn.state() == State::Failed {
+                        let mut err_buf = [0u8; 32];
+                        if let Ok(n) = self.conn.write_error(&mut err_buf) {
+                            let _ = self.transport.write_all(&err_buf[..n]);
+                        }
+                    }
+                    return Err(e);
+                }
             }
         }
 
