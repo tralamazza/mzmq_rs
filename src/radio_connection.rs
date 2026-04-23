@@ -4,10 +4,15 @@ use crate::greeting::{
     GREETING_LEN, GREETING_PARTIAL_LEN, GreetingError, encode_greeting, parse_greeting,
     parse_partial_greeting,
 };
+#[cfg(feature = "plain")]
+use crate::greeting::{encode_plain_greeting, parse_plain_greeting};
 use crate::group_table::GroupTable;
 use crate::null::{
     NullError, RADIO_READY_LEN, encode_error, encode_ready_radio, parse_ready_radio_from,
 };
+use crate::plain::AuthCheck;
+#[cfg(feature = "plain")]
+use crate::plain::{PlainError, WELCOME_LEN, encode_welcome, parse_hello_from};
 
 /// Headers returned by [`RadioConnection::publish_headers`]:
 /// `(group_hdr, group_hdr_len, body_hdr, body_hdr_len)`.
@@ -18,8 +23,14 @@ pub type PublishHeaders = ([u8; MAX_FRAME_HEADER], usize, [u8; MAX_FRAME_HEADER]
 pub enum State {
     /// Waiting to send our greeting (or awaiting peer greeting bytes).
     Greeting,
-    /// Greeting exchanged; awaiting READY command from peer.
+    /// Greeting exchanged; awaiting READY command from peer (NULL mechanism).
     Ready,
+    /// PLAIN: greeting exchanged; awaiting HELLO command from peer.
+    #[cfg(feature = "plain")]
+    PlainHello,
+    /// PLAIN: HELLO validated; caller must send WELCOME then READY, then await peer READY.
+    #[cfg(feature = "plain")]
+    PlainReady,
     /// Handshake complete; can publish messages.
     Established,
     /// Unrecoverable error; connection must be dropped.
@@ -30,10 +41,14 @@ pub enum State {
 /// `GROUP_CAP` = max simultaneous group memberships per peer.
 /// `GROUP_LEN_CAP` = max bytes per group name.
 /// `FRAME_CAP` = max body bytes buffered in the internal frame decoder.
+/// `A` = authenticator type; use the default `()` for the NULL mechanism,
+///       or supply an [`Authenticator`](crate::plain::Authenticator) and construct via
+///       [`RadioConnection::new_plain`] for the PLAIN mechanism (requires the `plain` feature).
 pub struct RadioConnection<
     const GROUP_CAP: usize,
     const GROUP_LEN_CAP: usize,
     const FRAME_CAP: usize,
+    A: AuthCheck = (),
 > {
     state: State,
     our_greeting_partial_sent: bool,
@@ -41,17 +56,25 @@ pub struct RadioConnection<
     peer_greeting_received: bool,
     peer_version_minor: u8,
     our_ready_sent: bool,
+    #[cfg(feature = "plain")]
+    our_welcome_sent: bool,
+    #[cfg(feature = "plain")]
+    is_plain: bool,
     greeting_buf: [u8; 64],
     greeting_pos: usize,
     frame_decoder: FrameDecoder<FRAME_CAP>,
     group_table: GroupTable<GROUP_CAP, GROUP_LEN_CAP>,
     pending_pong: Option<([u8; 16], usize)>,
+    #[cfg(feature = "plain")]
+    auth: A,
+    #[cfg(not(feature = "plain"))]
+    _auth: core::marker::PhantomData<A>,
 }
 
 impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
-    RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP>
+    RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP, ()>
 {
-    /// Create a new connection in the `Greeting` state.
+    /// Create a new NULL-mechanism connection in the `Greeting` state.
     pub fn new() -> Self {
         Self {
             state: State::Greeting,
@@ -60,14 +83,61 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
             peer_greeting_received: false,
             peer_version_minor: 0,
             our_ready_sent: false,
+            #[cfg(feature = "plain")]
+            our_welcome_sent: false,
+            #[cfg(feature = "plain")]
+            is_plain: false,
             greeting_buf: [0u8; 64],
             greeting_pos: 0,
             frame_decoder: FrameDecoder::new(),
             group_table: GroupTable::new(),
             pending_pong: None,
+            #[cfg(feature = "plain")]
+            auth: (),
+            #[cfg(not(feature = "plain"))]
+            _auth: core::marker::PhantomData,
         }
     }
+}
 
+impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize> Default
+    for RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP, ()>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "plain")]
+impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize, A>
+    RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP, A>
+where
+    A: crate::plain::Authenticator,
+{
+    /// Create a new PLAIN-mechanism connection in the `Greeting` state.
+    pub fn new_plain(auth: A) -> Self {
+        Self {
+            state: State::Greeting,
+            our_greeting_partial_sent: false,
+            our_greeting_sent: false,
+            peer_greeting_received: false,
+            peer_version_minor: 0,
+            our_ready_sent: false,
+            our_welcome_sent: false,
+            is_plain: true,
+            greeting_buf: [0u8; 64],
+            greeting_pos: 0,
+            frame_decoder: FrameDecoder::new(),
+            group_table: GroupTable::new(),
+            pending_pong: None,
+            auth,
+        }
+    }
+}
+
+impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize, A: AuthCheck>
+    RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP, A>
+{
     /// Current handshake [`State`] of the connection.
     pub fn state(&self) -> &State {
         &self.state
@@ -77,19 +147,7 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
     pub fn peer_version(&self) -> (u8, u8) {
         (3, self.peer_version_minor)
     }
-}
 
-impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize> Default
-    for RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP>
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
-    RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP>
-{
     /// Write the first 11 bytes of our greeting (signature + version major) into `out`.
     /// Call once after creating the connection.
     /// Returns Ok(GREETING_PARTIAL_LEN) or Err if not in Greeting state or buf too small.
@@ -109,7 +167,8 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
 
     /// Write the remaining 53 bytes of our greeting into `out`.
     /// Call after receiving the peer's partial greeting (11 bytes).
-    /// If the peer's full greeting is already received, transitions state to Ready.
+    /// If the peer's full greeting is already received, transitions state to Ready (NULL)
+    /// or PlainHello (PLAIN).
     pub fn write_greeting_rest(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         if self.state != State::Greeting
             || !self.our_greeting_partial_sent
@@ -122,11 +181,29 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
             return Err(ConnError::BufferTooSmall);
         }
         let mut arr = [0u8; GREETING_LEN];
+        #[cfg(not(feature = "plain"))]
         encode_greeting(&mut arr);
+        #[cfg(feature = "plain")]
+        if self.is_plain {
+            encode_plain_greeting(&mut arr);
+        } else {
+            encode_greeting(&mut arr);
+        }
         out[..rest_len].copy_from_slice(&arr[GREETING_PARTIAL_LEN..]);
         self.our_greeting_sent = true;
         if self.peer_greeting_received {
-            self.state = State::Ready;
+            #[cfg(not(feature = "plain"))]
+            {
+                self.state = State::Ready;
+            }
+            #[cfg(feature = "plain")]
+            {
+                self.state = if self.is_plain {
+                    State::PlainHello
+                } else {
+                    State::Ready
+                };
+            }
         }
         Ok(rest_len)
     }
@@ -141,9 +218,15 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
     }
 
     /// Write our RADIO READY command into `out`. Call after receiving a valid peer greeting.
+    /// For PLAIN, `write_welcome` must be called first.
     /// Returns Ok(RADIO_READY_LEN) or Err.
     pub fn write_ready(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
-        if self.state != State::Ready {
+        #[cfg(not(feature = "plain"))]
+        let in_ready_state = self.state == State::Ready;
+        #[cfg(feature = "plain")]
+        let in_ready_state = self.state == State::Ready
+            || (self.state == State::PlainReady && self.our_welcome_sent);
+        if !in_ready_state {
             return Err(ConnError::WrongState);
         }
         if self.our_ready_sent {
@@ -164,6 +247,10 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
         match self.state {
             State::Greeting => self.feed_greeting(input),
             State::Ready => self.feed_ready(input),
+            #[cfg(feature = "plain")]
+            State::PlainHello => self.feed_plain_hello(input),
+            #[cfg(feature = "plain")]
+            State::PlainReady => self.feed_plain_ready(input),
             State::Established => self.feed_established(input),
             State::Failed => Err(ConnError::WrongState),
         }
@@ -185,12 +272,30 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
         }
 
         if self.greeting_pos == GREETING_LEN {
+            #[cfg(not(feature = "plain"))]
             let peer_greeting =
                 parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?;
+            #[cfg(feature = "plain")]
+            let peer_greeting = if self.is_plain {
+                parse_plain_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+            } else {
+                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+            };
             self.peer_version_minor = peer_greeting.version_minor;
             self.peer_greeting_received = true;
-            if self.our_greeting_sent && self.peer_greeting_received {
-                self.state = State::Ready;
+            if self.our_greeting_sent {
+                #[cfg(not(feature = "plain"))]
+                {
+                    self.state = State::Ready;
+                }
+                #[cfg(feature = "plain")]
+                {
+                    self.state = if self.is_plain {
+                        State::PlainHello
+                    } else {
+                        State::Ready
+                    };
+                }
             }
         }
 
@@ -341,6 +446,78 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
         out[7..7 + ctx_len].copy_from_slice(&ctx[..ctx_len]);
         Ok(Some(total))
     }
+
+    /// Encode a WELCOME command into `out`. Must be called after `feed` transitions to
+    /// `PlainReady`, and before `write_ready`.
+    #[cfg(feature = "plain")]
+    pub fn write_welcome(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
+        if self.state != State::PlainReady || self.our_welcome_sent {
+            return Err(ConnError::WrongState);
+        }
+        encode_welcome(out).map_err(ConnError::PlainError)?;
+        self.our_welcome_sent = true;
+        Ok(WELCOME_LEN)
+    }
+
+    #[cfg(feature = "plain")]
+    fn feed_plain_hello(&mut self, input: &[u8]) -> Result<usize, ConnError> {
+        let (consumed, maybe_frame) = self
+            .frame_decoder
+            .feed(input)
+            .map_err(ConnError::DecodeError)?;
+
+        if let Some(frame) = maybe_frame {
+            let body = frame.body;
+            if body.len() > 255 {
+                self.state = State::Failed;
+                return Err(ConnError::PlainError(PlainError::MalformedHello));
+            }
+            match parse_hello_from(frame.is_command, body) {
+                Ok((username, password)) => {
+                    if self.auth.check(username, password) {
+                        self.state = State::PlainReady;
+                    } else {
+                        self.state = State::Failed;
+                        return Err(ConnError::PlainError(PlainError::AuthFailed));
+                    }
+                }
+                Err(e) => {
+                    self.state = State::Failed;
+                    return Err(ConnError::PlainError(e));
+                }
+            }
+        }
+        Ok(consumed)
+    }
+
+    #[cfg(feature = "plain")]
+    fn feed_plain_ready(&mut self, input: &[u8]) -> Result<usize, ConnError> {
+        if !self.our_welcome_sent || !self.our_ready_sent {
+            return Err(ConnError::WrongState);
+        }
+        let (consumed, maybe_frame) = self
+            .frame_decoder
+            .feed(input)
+            .map_err(ConnError::DecodeError)?;
+
+        if let Some(frame) = maybe_frame {
+            let body = frame.body;
+            if body.len() > 255 {
+                self.state = State::Failed;
+                return Err(ConnError::NullError(NullError::MalformedMetadata));
+            }
+            match parse_ready_radio_from(frame.is_command, body) {
+                Ok(_) => {
+                    self.state = State::Established;
+                }
+                Err(e) => {
+                    self.state = State::Failed;
+                    return Err(ConnError::NullError(e));
+                }
+            }
+        }
+        Ok(consumed)
+    }
 }
 
 /// Errors returned by [`RadioConnection`] operations.
@@ -356,6 +533,9 @@ pub enum ConnError {
     GreetingError(GreetingError),
     /// NULL mechanism error (READY/ERROR handshake).
     NullError(NullError),
+    /// PLAIN mechanism error (HELLO/WELCOME handshake).
+    #[cfg(feature = "plain")]
+    PlainError(PlainError),
     /// Outbound frame could not be encoded.
     FrameError(FrameError),
     /// Inbound frame could not be decoded.

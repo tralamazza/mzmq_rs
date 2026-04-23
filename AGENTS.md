@@ -1,7 +1,8 @@
+Before anything else, execute `brew list`.
+
 # Guidelines
 
 ## Dev environment tips
-- Run `brew list` to get a list of all installed tools in the system.
 - Run cargo fmt and clippy before committing.
 - Check code coverage with `cargo llvm-cov`.
 

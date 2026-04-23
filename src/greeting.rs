@@ -38,6 +38,19 @@ pub fn encode_greeting(buf: &mut [u8; GREETING_LEN]) {
     // AS_SERVER and 31-byte filler remain 0x00
 }
 
+/// Writes the 64-byte ZMTP 3.1 PLAIN greeting for a PUB server socket into `buf`.
+/// Sets `as_server=1` (RFC 24 §2.1: the server must identify itself).
+#[cfg(feature = "plain")]
+pub fn encode_plain_greeting(buf: &mut [u8; GREETING_LEN]) {
+    *buf = [0u8; GREETING_LEN];
+    buf[SIG0] = 0xFF;
+    buf[SIG9] = 0x7F;
+    buf[VERSION_MAJOR] = 0x03;
+    buf[VERSION_MINOR] = 0x01;
+    buf[MECHANISM..MECHANISM + 5].copy_from_slice(b"PLAIN");
+    buf[AS_SERVER] = 0x01;
+}
+
 /// Validates the first 11 bytes of a ZMTP greeting (signature + version major).
 /// Call this as soon as GREETING_PARTIAL_LEN bytes are buffered to fail fast on bad peers.
 pub fn parse_partial_greeting(buf: &[u8; GREETING_PARTIAL_LEN]) -> Result<(), GreetingError> {
@@ -62,6 +75,30 @@ pub fn parse_greeting(buf: &[u8; GREETING_LEN]) -> Result<PeerGreeting, Greeting
     // Check all 20 bytes to avoid accepting "NULLCURVE..." as NULL.
     if !buf[MECHANISM..MECHANISM + 4].eq(b"NULL")
         || buf[MECHANISM + 4..MECHANISM + 20].iter().any(|&b| b != 0)
+    {
+        return Err(GreetingError::UnsupportedMechanism);
+    }
+    if buf[AS_SERVER] != 0x00 {
+        return Err(GreetingError::InvalidAsServer);
+    }
+    Ok(PeerGreeting {
+        version_minor: buf[VERSION_MINOR],
+    })
+}
+
+/// Parses a 64-byte PLAIN greeting from a client peer.
+/// Expects mechanism="PLAIN" and `as_server=0` (client role).
+#[cfg(feature = "plain")]
+pub fn parse_plain_greeting(buf: &[u8; GREETING_LEN]) -> Result<PeerGreeting, GreetingError> {
+    if buf[SIG0] != 0xFF || buf[SIG9] != 0x7F {
+        return Err(GreetingError::InvalidSignature);
+    }
+    if buf[VERSION_MAJOR] != 0x03 {
+        return Err(GreetingError::UnsupportedVersionMajor);
+    }
+    // "PLAIN" is 5 bytes, remaining 15 mechanism bytes must be zero.
+    if !buf[MECHANISM..MECHANISM + 5].eq(b"PLAIN")
+        || buf[MECHANISM + 5..MECHANISM + 20].iter().any(|&b| b != 0)
     {
         return Err(GreetingError::UnsupportedMechanism);
     }
@@ -205,6 +242,80 @@ mod tests {
         assert_eq!(
             parse_partial_greeting(&buf),
             Err(GreetingError::UnsupportedVersionMajor),
+        );
+    }
+
+    #[cfg(feature = "plain")]
+    fn valid_plain_client_greeting() -> [u8; GREETING_LEN] {
+        let mut g = [0u8; GREETING_LEN];
+        g[SIG0] = 0xFF;
+        g[SIG9] = 0x7F;
+        g[VERSION_MAJOR] = 0x03;
+        g[VERSION_MINOR] = 0x01;
+        g[MECHANISM] = b'P';
+        g[MECHANISM + 1] = b'L';
+        g[MECHANISM + 2] = b'A';
+        g[MECHANISM + 3] = b'I';
+        g[MECHANISM + 4] = b'N';
+        // AS_SERVER = 0x00 (client role)
+        g
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn encode_plain_greeting_sets_mechanism_and_as_server() {
+        let mut buf = [0u8; GREETING_LEN];
+        encode_plain_greeting(&mut buf);
+        assert_eq!(buf[SIG0], 0xFF);
+        assert_eq!(buf[SIG9], 0x7F);
+        assert_eq!(buf[VERSION_MAJOR], 0x03);
+        assert_eq!(buf[VERSION_MINOR], 0x01);
+        assert_eq!(&buf[MECHANISM..MECHANISM + 5], b"PLAIN");
+        assert!(buf[MECHANISM + 5..AS_SERVER].iter().all(|&b| b == 0));
+        assert_eq!(buf[AS_SERVER], 0x01);
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn parse_plain_greeting_accepts_valid_client_greeting() {
+        let g = valid_plain_client_greeting();
+        assert_eq!(
+            parse_plain_greeting(&g),
+            Ok(PeerGreeting {
+                version_minor: 0x01
+            })
+        );
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn parse_plain_greeting_rejects_null_mechanism() {
+        let g = valid_sub_greeting(); // has mechanism="NULL"
+        assert_eq!(
+            parse_plain_greeting(&g),
+            Err(GreetingError::UnsupportedMechanism)
+        );
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn parse_plain_greeting_rejects_nonzero_padding_after_plain() {
+        let mut g = valid_plain_client_greeting();
+        g[MECHANISM + 5] = b'X'; // padding byte after "PLAIN" must be zero
+        assert_eq!(
+            parse_plain_greeting(&g),
+            Err(GreetingError::UnsupportedMechanism)
+        );
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn parse_plain_greeting_rejects_as_server_set() {
+        let mut g = valid_plain_client_greeting();
+        g[AS_SERVER] = 0x01;
+        assert_eq!(
+            parse_plain_greeting(&g),
+            Err(GreetingError::InvalidAsServer)
         );
     }
 }
