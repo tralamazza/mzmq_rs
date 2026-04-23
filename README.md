@@ -1,30 +1,27 @@
 # mzmq
 
-Minimal `no_std` ZMQ (ZMTP 3.1) PUB and RADIO transport for embedded Rust.
-
 [![Rust CI](https://github.com/tralamazza/mzmq_rs/actions/workflows/ci.yml/badge.svg)](https://github.com/tralamazza/mzmq_rs/actions/workflows/ci.yml)
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-blue)](https://github.com/rust-lang/rust/releases/tag/1.88.0)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-## Purpose
+A `no_std`, `no_alloc` Rust library that speaks [ZMTP 3.1](https://rfc.zeromq.org/spec/37/) as a **PUB** or **RADIO** endpoint. Built for Cortex-M-class targets that need to publish telemetry to ZMQ-based tooling without linking libzmq or pulling in `tokio`.
 
-A tiny, `no_std`, `no_alloc` Rust library that speaks ZMTP 3.1 as a PUB or RADIO
-endpoint. Designed for embedded Cortex-M-class targets that need to publish
-telemetry to ZMQ-based tooling (dashboards, log collectors, control planes)
-without linking libzmq or pulling in `tokio`.
+## When to use this
 
-## Features
+- You have an embedded device (or any `no_std` target) that needs to push data to a ZMQ subscriber
+- You want to use the standard PUB-SUB or RADIO-DISH wire protocol with zero heap allocation
+- You do **not** need to receive messages or act as a broker
 
-| Feature | Description |
-|---------|-------------|
-| `std` | Opts out of `no_std`; required when building on hosted targets |
-| `sync` | Blocking driver over `embedded-io` (default) |
-| `async` | Async driver over `embedded-io-async` |
-| `python-tests` | Integration tests against real `pyzmq` |
+## Getting started
 
-Default: `default = ["sync"]`
+Add to `Cargo.toml`:
 
-## Usage
+```toml
+[dependencies]
+mzmq = "0.1"
+```
+
+### PUB-SUB
 
 ```rust
 use embedded_io_adapters::std::FromStd;
@@ -36,26 +33,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stream.set_nonblocking(true)?;
 
     // Driver::<SUB_CAP, PREFIX_CAP, FRAME_CAP, Transport>
-    //   SUB_CAP    = max simultaneous subscriptions
-    //   PREFIX_CAP = max bytes per subscription prefix
-    //   FRAME_CAP  = internal frame decoder buffer size
+    //   SUB_CAP    — max simultaneous subscriptions
+    //   PREFIX_CAP — max bytes per subscription prefix
+    //   FRAME_CAP  — internal frame buffer size
     let mut driver = Driver::<8, 32, 1024, _>::new(FromStd::new(stream))?;
 
-    // Drive the ZMTP handshake until Established.
-    while !driver.poll()? {}
+    while !driver.poll()? {}                      // drive the ZMTP handshake
 
-    // Publish. Returns 0 if no peer subscription matches `b"hello"`.
-    driver.publish(b"hello", b"world")?;
+    driver.publish(b"hello", b"world")?;          // returns 0 if no subscriber matches
     Ok(())
 }
 ```
 
-See [`examples/pub_hello.rs`](examples/pub_hello.rs) for a runnable version with
-timeouts and error handling.
+### RADIO-DISH (RFC 48)
 
-### RADIO (RFC 48 / RADIO-DISH)
-
-For the RADIO-DISH pattern, use the `RadioDriver` instead:
+Groups are matched by **exact byte equality**, unlike the prefix matching of PUB-SUB.
 
 ```rust
 use embedded_io_adapters::std::FromStd;
@@ -67,43 +59,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stream.set_nonblocking(true)?;
 
     // RadioDriver::<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP, Transport>
-    //   GROUP_CAP      = max simultaneous group memberships
-    //   GROUP_LEN_CAP  = max bytes per group name
-    //   FRAME_CAP      = internal frame decoder buffer size
     let mut driver = RadioDriver::<8, 32, 1024, _>::new(FromStd::new(stream))?;
 
     while !driver.poll()? {}
 
-    // Publish. Returns 0 if no peer has joined group `b"alerts"`.
     driver.publish(b"alerts", b"temperature critical")?;
     Ok(())
 }
 ```
 
-Groups are matched by **exact byte equality** (not prefix matching like PUB-SUB).
+See [`examples/pub_hello.rs`](examples/pub_hello.rs) for a runnable version with timeouts and error handling.
 
-## RFC 37 (ZMTP 3.1)
+## Features
 
-This implementation follows the [ZMTP 3.1 specification](https://rfc.zeromq.org/spec/37/).
+| Feature | Default | Description |
+|---------|:-------:|-------------|
+| `sync` | yes | Blocking driver over `embedded-io` |
+| `async` | no | Async driver over `embedded-io-async` |
+| `std` | no | Opt out of `no_std`; required on hosted targets |
+| `python-tests` | no | Integration tests against a real `pyzmq` process |
 
-- **Roles**: PUB (to SUB/XSUB peers) and RADIO (to DISH peers, RFC 48)
-- **Security**: NULL mechanism only
-- **Framing**: Short (≤255 bytes) + long (>255 bytes) frames
-- **Subscriptions**: Parses SUBSCRIBE/CANCEL (3.1) and 0x01/0x00 prefix (3.0)
-- **Groups**: Parses JOIN/LEAVE (RADIO-DISH, RFC 48) with exact matching
+## no_std / embedded targets
 
-## no_std Operation
-
-The sans-IO core compiles with `--no-default-features`:
+The sans-IO core compiles with no default features:
 
 ```bash
-cargo test --no-default-features
 cargo build --no-default-features --target thumbv7em-none-eabihf
 ```
 
-## Interop Testing
+All capacity bounds (`SUB_CAP`, `PREFIX_CAP`, `FRAME_CAP`, …) are const generics resolved at compile time. The library uses [`heapless`](https://docs.rs/heapless) internally — no allocator required.
 
-Real ZMQ interop tests against `pyzmq>=26`:
+## Protocol scope
+
+- **Transport**: ZMTP 3.1 (RFC 37), NULL security mechanism only
+- **Roles**: PUB (to SUB/XSUB peers) and RADIO (to DISH peers)
+- **Framing**: short frames (≤ 255 bytes) and long frames (> 255 bytes)
+- **Subscriptions**: SUBSCRIBE/CANCEL (3.1) and legacy 0x01/0x00 prefix (3.0)
+- **Groups**: JOIN/LEAVE (RFC 48) with exact matching
+
+## Interop tests
+
+Run the integration tests against a live `pyzmq >= 26` process:
 
 ```bash
 uv sync
