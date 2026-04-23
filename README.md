@@ -17,10 +17,9 @@ linking libzmq or pulling in `tokio`.
 
 | Feature | Description |
 |---------|-------------|
-| `std` | Impls for `std::net::TcpStream` (enables `sync`) |
+| `std` | Opts out of `no_std`; required when building on hosted targets |
 | `sync` | Blocking driver over `embedded-io` (default) |
 | `async` | Async driver over `embedded-io-async` |
-| `alloc` | Enables `heapless` for subscription table |
 | `python-tests` | Integration tests against real `pyzmq` |
 
 Default: `default = ["sync"]`

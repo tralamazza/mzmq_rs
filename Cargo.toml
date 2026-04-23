@@ -11,8 +11,6 @@ default = ["sync"]
 std = []
 sync = ["dep:embedded-io"]
 async = ["dep:embedded-io-async"]
-alloc = []
-alloc-for-tests = ["alloc"]
 python-tests = []
 
 [dependencies]
