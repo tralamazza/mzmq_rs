@@ -1,5 +1,8 @@
 /// Fixed size of a ZMTP 3.1 greeting frame in bytes.
 pub const GREETING_LEN: usize = 64;
+/// Number of bytes in the partial greeting (signature + version major).
+/// VERSION_MAJOR is the index of that byte, so +1 gives the length.
+pub const GREETING_PARTIAL_LEN: usize = VERSION_MAJOR + 1;
 
 const SIG0: usize = 0;
 const SIG9: usize = 9;
@@ -33,6 +36,18 @@ pub fn encode_greeting(buf: &mut [u8; GREETING_LEN]) {
     buf[VERSION_MINOR] = 0x01; // ZMTP 3.1
     buf[MECHANISM..MECHANISM + 4].copy_from_slice(b"NULL");
     // AS_SERVER and 31-byte filler remain 0x00
+}
+
+/// Validates the first 11 bytes of a ZMTP greeting (signature + version major).
+/// Call this as soon as GREETING_PARTIAL_LEN bytes are buffered to fail fast on bad peers.
+pub fn parse_partial_greeting(buf: &[u8; GREETING_PARTIAL_LEN]) -> Result<(), GreetingError> {
+    if buf[SIG0] != 0xFF || buf[SIG9] != 0x7F {
+        return Err(GreetingError::InvalidSignature);
+    }
+    if buf[VERSION_MAJOR] != 0x03 {
+        return Err(GreetingError::UnsupportedVersionMajor);
+    }
+    Ok(())
 }
 
 /// Parses a 64-byte greeting from a peer. Returns the peer's version minor.
@@ -158,5 +173,38 @@ mod tests {
         let mut g = valid_sub_greeting();
         g[AS_SERVER] = 0x01;
         assert_eq!(parse_greeting(&g), Err(GreetingError::InvalidAsServer));
+    }
+
+    #[test]
+    fn partial_greeting_accepts_valid_first_11_bytes() {
+        let mut buf = [0u8; GREETING_PARTIAL_LEN];
+        buf[SIG0] = 0xFF;
+        buf[SIG9] = 0x7F;
+        buf[VERSION_MAJOR] = 0x03;
+        assert_eq!(parse_partial_greeting(&buf), Ok(()));
+    }
+
+    #[test]
+    fn partial_greeting_rejects_wrong_signature() {
+        let mut buf = [0u8; GREETING_PARTIAL_LEN];
+        buf[SIG0] = 0xFE;
+        buf[SIG9] = 0x7F;
+        buf[VERSION_MAJOR] = 0x03;
+        assert_eq!(
+            parse_partial_greeting(&buf),
+            Err(GreetingError::InvalidSignature),
+        );
+    }
+
+    #[test]
+    fn partial_greeting_rejects_wrong_version_major() {
+        let mut buf = [0u8; GREETING_PARTIAL_LEN];
+        buf[SIG0] = 0xFF;
+        buf[SIG9] = 0x7F;
+        buf[VERSION_MAJOR] = 0x02;
+        assert_eq!(
+            parse_partial_greeting(&buf),
+            Err(GreetingError::UnsupportedVersionMajor),
+        );
     }
 }

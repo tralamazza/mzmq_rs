@@ -1,6 +1,9 @@
 use crate::frame::decode_error::DecodeError;
 use crate::frame::{FrameDecoder, FrameError, MAX_FRAME_HEADER, encode_message_frame};
-use crate::greeting::{GREETING_LEN, GreetingError, encode_greeting, parse_greeting};
+use crate::greeting::{
+    GREETING_LEN, GREETING_PARTIAL_LEN, GreetingError, encode_greeting, parse_greeting,
+    parse_partial_greeting,
+};
 use crate::null::{NullError, READY_LEN, encode_error, encode_ready, parse_ready_from};
 use crate::sub_table::SubTable;
 
@@ -27,6 +30,7 @@ pub enum State {
 /// `FRAME_CAP` = max body bytes buffered in the internal frame decoder.
 pub struct Connection<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize> {
     state: State,
+    our_greeting_partial_sent: bool,
     our_greeting_sent: bool,
     peer_greeting_received: bool,
     peer_version_minor: u8,
@@ -45,6 +49,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     pub fn new() -> Self {
         Self {
             state: State::Greeting,
+            our_greeting_partial_sent: false,
             our_greeting_sent: false,
             peer_greeting_received: false,
             peer_version_minor: 0,
@@ -79,20 +84,54 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize> Defa
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP>
 {
-    /// Write our greeting into `out`. Call once after creating the connection.
-    /// Returns Ok(GREETING_LEN) or Err if not in Greeting state or buf too small.
+    /// Write the first 11 bytes of our greeting (signature + version major) into `out`.
+    /// Call once after creating the connection.
+    /// Returns Ok(GREETING_PARTIAL_LEN) or Err if not in Greeting state or buf too small.
     pub fn write_greeting(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
-        if self.state != State::Greeting || self.our_greeting_sent {
+        if self.state != State::Greeting || self.our_greeting_partial_sent {
             return Err(ConnError::WrongState);
         }
-        if out.len() < GREETING_LEN {
+        if out.len() < GREETING_PARTIAL_LEN {
             return Err(ConnError::BufferTooSmall);
         }
         let mut arr = [0u8; GREETING_LEN];
         encode_greeting(&mut arr);
-        out[..GREETING_LEN].copy_from_slice(&arr);
+        out[..GREETING_PARTIAL_LEN].copy_from_slice(&arr[..GREETING_PARTIAL_LEN]);
+        self.our_greeting_partial_sent = true;
+        Ok(GREETING_PARTIAL_LEN)
+    }
+
+    /// Write the remaining 53 bytes of our greeting into `out`.
+    /// Call after receiving the peer's partial greeting (11 bytes).
+    /// If the peer's full greeting is already received, transitions state to Ready.
+    pub fn write_greeting_rest(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
+        if self.state != State::Greeting
+            || !self.our_greeting_partial_sent
+            || self.our_greeting_sent
+        {
+            return Err(ConnError::WrongState);
+        }
+        let rest_len = GREETING_LEN - GREETING_PARTIAL_LEN;
+        if out.len() < rest_len {
+            return Err(ConnError::BufferTooSmall);
+        }
+        let mut arr = [0u8; GREETING_LEN];
+        encode_greeting(&mut arr);
+        out[..rest_len].copy_from_slice(&arr[GREETING_PARTIAL_LEN..]);
         self.our_greeting_sent = true;
-        Ok(GREETING_LEN)
+        if self.peer_greeting_received {
+            self.state = State::Ready;
+        }
+        Ok(rest_len)
+    }
+
+    /// Returns `true` if we have sent our partial greeting, received the peer's partial greeting,
+    /// but have not yet sent the remaining 53 bytes.
+    pub fn greeting_rest_pending(&self) -> bool {
+        self.state == State::Greeting
+            && self.our_greeting_partial_sent
+            && !self.our_greeting_sent
+            && self.greeting_pos >= GREETING_PARTIAL_LEN
     }
 
     /// Write our READY command into `out`. Call after receiving a valid peer greeting.
@@ -127,9 +166,17 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     fn feed_greeting(&mut self, input: &[u8]) -> Result<usize, ConnError> {
         let needed = GREETING_LEN - self.greeting_pos;
         let to_copy = input.len().min(needed);
+        let prev_pos = self.greeting_pos;
         self.greeting_buf[self.greeting_pos..self.greeting_pos + to_copy]
             .copy_from_slice(&input[..to_copy]);
         self.greeting_pos += to_copy;
+
+        if prev_pos < GREETING_PARTIAL_LEN && self.greeting_pos >= GREETING_PARTIAL_LEN {
+            let partial: &[u8; GREETING_PARTIAL_LEN] = self.greeting_buf[..GREETING_PARTIAL_LEN]
+                .try_into()
+                .unwrap();
+            parse_partial_greeting(partial).map_err(ConnError::GreetingError)?;
+        }
 
         if self.greeting_pos == GREETING_LEN {
             let arr_ref: &[u8; 64] = &self.greeting_buf;
@@ -352,6 +399,7 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&sub_greeting()).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         conn.write_ready(&mut ready_out).unwrap();
         conn.feed(&sub_ready()).unwrap();
@@ -399,16 +447,18 @@ mod tests {
         assert_eq!(conn.state(), &State::Greeting);
     }
 
-    // Test 2: write_greeting writes 64 bytes
+    // Test 2: write_greeting writes 11 bytes (partial greeting)
     #[test]
     fn write_greeting_succeeds() {
         let mut conn: Connection<8, 32, 512> = Connection::new();
         let mut out = [0u8; 64];
         let n = conn.write_greeting(&mut out).unwrap();
-        assert_eq!(n, GREETING_LEN);
+        assert_eq!(n, GREETING_PARTIAL_LEN);
         assert_eq!(out[0], 0xFF);
         assert_eq!(out[9], 0x7F);
         assert_eq!(out[10], 0x03);
+        // The rest of the greeting should not have been written
+        assert!(out[11..].iter().all(|&b| b == 0));
     }
 
     // Test 3: calling write_greeting twice returns WrongState
@@ -421,13 +471,15 @@ mod tests {
         assert_eq!(result, Err(ConnError::WrongState));
     }
 
-    // Test 4: feed(SUB_GREETING) after write_greeting advances to Ready
+    // Test 4: feed(SUB_GREETING) after write_greeting + write_greeting_rest advances to Ready
     #[test]
     fn feed_peer_greeting_advances_to_ready() {
         let mut conn: Connection<8, 32, 512> = Connection::new();
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&sub_greeting()).unwrap();
+        assert_eq!(conn.state(), &State::Greeting); // still waiting for our greeting rest
+        conn.write_greeting_rest(&mut out).unwrap();
         assert_eq!(conn.state(), &State::Ready);
     }
 
@@ -438,6 +490,7 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&sub_greeting()).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         let n = conn.write_ready(&mut ready_out).unwrap();
         assert_eq!(n, READY_LEN);
@@ -458,6 +511,7 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&sub_greeting()).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         conn.write_ready(&mut ready_out).unwrap();
         let result = conn.feed(&push_ready());
@@ -596,6 +650,7 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&sub_greeting()).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         conn.write_ready(&mut ready_out).unwrap();
         let _ = conn.feed(&push_ready());
@@ -646,6 +701,7 @@ mod tests {
         let mut greeting_30 = sub_greeting();
         greeting_30[11] = 0x00;
         conn.feed(&greeting_30).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
 
         // Complete handshake
         let mut ready_out = [0u8; 32];
@@ -678,5 +734,132 @@ mod tests {
 
         let mut pong_buf = [0u8; 23];
         assert!(conn.write_pong(&mut pong_buf).unwrap().is_some());
+    }
+
+    // Test 20: write_greeting_rest writes remaining 53 bytes
+    #[test]
+    fn write_greeting_rest_succeeds() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+        let n = conn.write_greeting_rest(&mut out).unwrap();
+        assert_eq!(n, GREETING_LEN - GREETING_PARTIAL_LEN);
+        assert_eq!(out[0], 0x01); // version minor
+        assert_eq!(&out[1..5], b"NULL");
+        assert!(out[5..].iter().all(|&b| b == 0));
+    }
+
+    // Test 21: calling write_greeting_rest before write_greeting fails
+    #[test]
+    fn write_greeting_rest_before_write_greeting_fails() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        let result = conn.write_greeting_rest(&mut out);
+        assert_eq!(result, Err(ConnError::WrongState));
+    }
+
+    // Test 22: calling write_greeting twice fails
+    #[test]
+    fn write_greeting_twice_fails() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+        let result = conn.write_greeting(&mut out);
+        assert_eq!(result, Err(ConnError::WrongState));
+    }
+
+    // Test 23: calling write_greeting_rest twice fails
+    #[test]
+    fn write_greeting_rest_twice_fails() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
+        let result = conn.write_greeting_rest(&mut out);
+        assert_eq!(result, Err(ConnError::WrongState));
+    }
+
+    // Test 24: greeting_rest_pending is true after receiving peer partial
+    #[test]
+    fn greeting_rest_pending_after_peer_partial() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+        assert!(!conn.greeting_rest_pending());
+
+        let partial = &sub_greeting()[..GREETING_PARTIAL_LEN];
+        conn.feed(partial).unwrap();
+        assert!(conn.greeting_rest_pending());
+
+        conn.write_greeting_rest(&mut out).unwrap();
+        assert!(!conn.greeting_rest_pending());
+    }
+
+    // Test 25: invalid signature in partial greeting fails fast
+    #[test]
+    fn feed_invalid_signature_in_partial_greeting_fails_fast() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+
+        let mut partial = [0u8; GREETING_PARTIAL_LEN];
+        partial[0] = 0xFE; // bad SIG0
+        partial[9] = 0x7F;
+        partial[10] = 0x03;
+        let result = conn.feed(&partial);
+        assert_eq!(
+            result,
+            Err(ConnError::GreetingError(GreetingError::InvalidSignature)),
+        );
+    }
+
+    // Test 26: bad version major in partial greeting fails fast, split across two feeds
+    #[test]
+    fn feed_unsupported_version_major_in_partial_greeting_fails_fast() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+
+        let mut g = [0u8; 64];
+        g[0] = 0xFF;
+        g[9] = 0x7F;
+        g[10] = 0x02; // ZMTP 2.x
+
+        conn.feed(&g[..5]).unwrap(); // before boundary — no check yet
+        let result = conn.feed(&g[5..11]); // crosses boundary — check fires
+        assert_eq!(
+            result,
+            Err(ConnError::GreetingError(
+                GreetingError::UnsupportedVersionMajor
+            )),
+        );
+    }
+
+    // Test 27: partial check fires exactly once; valid greeting split at the boundary
+    #[test]
+    fn feed_partial_check_fires_only_once_across_multiple_calls() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+
+        let g = sub_greeting();
+        conn.feed(&g[..GREETING_PARTIAL_LEN]).unwrap();
+        conn.feed(&g[GREETING_PARTIAL_LEN..]).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
+        assert_eq!(conn.state(), &State::Ready);
+    }
+
+    // Test 28: write_greeting + write_greeting_rest produces the canonical 64-byte greeting
+    #[test]
+    fn write_greeting_concat_matches_encode_greeting() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut combined = [0u8; GREETING_LEN];
+        let n1 = conn.write_greeting(&mut combined).unwrap();
+        let n2 = conn.write_greeting_rest(&mut combined[n1..]).unwrap();
+        assert_eq!(n1 + n2, GREETING_LEN);
+
+        let mut expected = [0u8; GREETING_LEN];
+        encode_greeting(&mut expected);
+        assert_eq!(combined, expected);
     }
 }
