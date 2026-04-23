@@ -1,0 +1,30 @@
+[package]
+name = "mzmq-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mzmq = { path = "..", default-features = false }
+
+[[bin]]
+name = "frame_decoder"
+path = "fuzz_targets/frame_decoder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "greeting_parser"
+path = "fuzz_targets/greeting_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "connection_feed"
+path = "fuzz_targets/connection_feed.rs"
+test = false
+doc = false
