@@ -169,6 +169,11 @@ impl<const CAP: usize> FrameDecoder<CAP> {
                     let more = (flags & 0x01) != 0;
                     let long = (flags & 0x02) != 0;
                     let is_command = (flags & 0x04) != 0;
+                    // RFC 37: MORE bit SHALL be zero on command frames.
+                    if is_command && more {
+                        self.state = State::Poisoned;
+                        return Err(DecodeError::ReservedFlagBits);
+                    }
                     self.state = State::NeedSize {
                         more,
                         is_command,
@@ -491,6 +496,15 @@ mod tests {
     fn decode_rejects_reserved_flag_bits() {
         let mut dec: FrameDecoder<64> = FrameDecoder::new();
         let input = [0x08u8, 0x01, 0x00]; // bit 3 set in flags
+        let result = dec.feed(&input);
+        assert_eq!(result, Err(DecodeError::ReservedFlagBits));
+    }
+
+    #[test]
+    fn decode_rejects_command_frame_with_more_bit() {
+        // flags = COMMAND(0x04) | MORE(0x01) = 0x05 — RFC 37 says SHALL be zero
+        let mut dec: FrameDecoder<64> = FrameDecoder::new();
+        let input = [0x05u8, 0x05, b'R', b'E', b'A', b'D', b'Y'];
         let result = dec.feed(&input);
         assert_eq!(result, Err(DecodeError::ReservedFlagBits));
     }
