@@ -39,6 +39,12 @@ impl<const MAX_ENTRIES: usize, const MAX_PREFIX_LEN: usize> SubTable<MAX_ENTRIES
     ///
     /// Returns `Err` if the table is full or the prefix exceeds `MAX_PREFIX_LEN`.
     /// Silently succeeds (no duplicate added) if the prefix is already present.
+    ///
+    /// **RFC 37 deviation:** ZMTP 3.1 requires subscriptions to be additive and
+    /// not idempotent — two identical `SUBSCRIBE` frames should require two
+    /// `CANCEL` frames to fully unsubscribe. This implementation deduplicates to
+    /// conserve bounded table space on embedded targets; one `CANCEL` always
+    /// removes the prefix regardless of how many `SUBSCRIBE` frames were received.
     pub fn subscribe(&mut self, prefix: &[u8]) -> Result<(), SubError> {
         if prefix.len() > MAX_PREFIX_LEN {
             return Err(SubError::PrefixTooLong);
