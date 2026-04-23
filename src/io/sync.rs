@@ -18,9 +18,6 @@ use embedded_io::{Error, Read, Write};
 /// Internal buffers (not configurable):
 /// - `rx_buf` is 512 bytes — holds handshake bytes and a single inbound
 ///   SUBSCRIBE/CANCEL frame, which fit comfortably at that size.
-/// - A stack-local 1024-byte `tx_buf` in [`Driver::publish`] encodes a
-///   worst-case multipart message (two 9-byte long-frame headers plus both
-///   payloads).
 pub struct Driver<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T> {
     conn: Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP>,
     transport: T,
@@ -128,14 +125,16 @@ where
 
     /// Publish a message. Returns 0 if no peer subscription matches.
     pub fn publish(&mut self, topic: &[u8], payload: &[u8]) -> Result<usize, ConnError> {
-        let mut tx_buf = [0u8; 1024];
-        let n = self.conn.publish(topic, payload, &mut tx_buf)?;
-        if n > 0 {
-            self.transport
-                .write_all(&tx_buf[..n])
-                .map_err(|e| ConnError::IoError(e.kind() as usize))?;
-        }
-        Ok(n)
+        let Some((th, th_n, ph, ph_n)) = self.conn.publish_headers(topic, payload)? else {
+            return Ok(0);
+        };
+        let io_err =
+            |e: <T as embedded_io::ErrorType>::Error| ConnError::IoError(e.kind() as usize);
+        self.transport.write_all(&th[..th_n]).map_err(io_err)?;
+        self.transport.write_all(topic).map_err(io_err)?;
+        self.transport.write_all(&ph[..ph_n]).map_err(io_err)?;
+        self.transport.write_all(payload).map_err(io_err)?;
+        Ok(th_n + topic.len() + ph_n + payload.len())
     }
 }
 
@@ -197,6 +196,31 @@ mod tests {
         }
     }
 
+    // ZMTP 3.1 SUBSCRIBE command frame for the given prefix.
+    fn sub_subscribe(prefix: &[u8]) -> alloc::vec::Vec<u8> {
+        let name = b"SUBSCRIBE";
+        let body_len = 1 + name.len() + prefix.len();
+        let mut f = alloc::vec::Vec::new();
+        f.push(0x04);
+        f.push(body_len as u8);
+        f.push(name.len() as u8);
+        f.extend_from_slice(name);
+        f.extend_from_slice(prefix);
+        f
+    }
+
+    fn make_established(prefix: Option<&[u8]>) -> Driver<8, 32, 512, MockTransport> {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&sub_greeting());
+        peer.extend_from_slice(&sub_ready());
+        if let Some(p) = prefix {
+            peer.extend_from_slice(&sub_subscribe(p));
+        }
+        let mut driver = Driver::<8, 32, 512, _>::new(MockTransport::new(peer)).unwrap();
+        while !driver.poll().unwrap() {}
+        driver
+    }
+
     #[test]
     fn driver_respects_deadlock_rule() {
         let mut peer_bytes = alloc::vec::Vec::new();
@@ -224,5 +248,31 @@ mod tests {
         let written = driver.transport.written();
         assert!(written.len() >= 64 + 27);
         assert_eq!(&written[64..64 + 27], &pub_ready());
+    }
+
+    #[test]
+    fn driver_publish_returns_zero_without_subscription() {
+        let mut driver = make_established(None);
+        assert_eq!(driver.publish(b"topic", b"payload").unwrap(), 0);
+    }
+
+    #[test]
+    fn driver_publish_writes_correct_wire_bytes() {
+        let mut driver = make_established(Some(b"foo"));
+        let n = driver.publish(b"foo", b"bar").unwrap();
+        assert_eq!(n, 10); // 2+3+2+3
+        // greeting (64) + pub_ready (27) = 91 bytes before publish output
+        let pub_out = &driver.transport.written()[91..];
+        assert_eq!(
+            pub_out,
+            &[0x01, 0x03, b'f', b'o', b'o', 0x00, 0x03, b'b', b'a', b'r']
+        );
+    }
+
+    #[test]
+    fn driver_publish_filtered_by_prefix() {
+        let mut driver = make_established(Some(b"foo"));
+        assert_eq!(driver.publish(b"bar", b"payload").unwrap(), 0);
+        assert!(driver.publish(b"fooX", b"payload").unwrap() > 0);
     }
 }
