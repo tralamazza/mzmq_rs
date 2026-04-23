@@ -1,5 +1,5 @@
 use crate::frame::decode_error::DecodeError;
-use crate::frame::{FrameDecoder, FrameError, encode_message_frame};
+use crate::frame::{FrameDecoder, FrameError, MAX_FRAME_HEADER, encode_message_frame};
 use crate::greeting::{GREETING_LEN, GreetingError, encode_greeting, parse_greeting};
 use crate::null::{NullError, READY_LEN, encode_error, encode_ready, parse_ready_from};
 use crate::sub_table::SubTable;
@@ -208,6 +208,30 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
         Ok(consumed)
     }
 
+    /// Encode the two ZMTP frame headers for a publish, after checking subscriptions.
+    /// Returns `Ok(None)` if no subscription matches; `Ok(Some(...))` with
+    /// `(topic_hdr, th_len, payload_hdr, ph_len)` otherwise.
+    pub fn publish_headers(
+        &mut self,
+        topic: &[u8],
+        payload: &[u8],
+    ) -> Result<Option<([u8; MAX_FRAME_HEADER], usize, [u8; MAX_FRAME_HEADER], usize)>, ConnError>
+    {
+        if self.state != State::Established {
+            return Err(ConnError::WrongState);
+        }
+        if !self.sub_table.matches(topic) {
+            return Ok(None);
+        }
+        let mut th = [0u8; MAX_FRAME_HEADER];
+        let th_n = encode_message_frame(&mut th, topic.len(), true)
+            .map_err(ConnError::FrameError)?;
+        let mut ph = [0u8; MAX_FRAME_HEADER];
+        let ph_n = encode_message_frame(&mut ph, payload.len(), false)
+            .map_err(ConnError::FrameError)?;
+        Ok(Some((th, th_n, ph, ph_n)))
+    }
+
     /// Publish a message to the peer. Only valid in Established state.
     /// Encodes a multipart message (MORE frame for topic, LAST frame for payload).
     /// Returns Ok(0) if the peer has no matching subscription.
@@ -217,35 +241,22 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
         payload: &[u8],
         out: &mut [u8],
     ) -> Result<usize, ConnError> {
-        if self.state != State::Established {
-            return Err(ConnError::WrongState);
-        }
-        if !self.sub_table.matches(topic) {
+        let Some((th, th_n, ph, ph_n)) = self.publish_headers(topic, payload)? else {
             return Ok(0);
-        }
-
-        let topic_header_len = if topic.len() <= 255 { 2 } else { 9 };
-        let payload_header_len = if payload.len() <= 255 { 2 } else { 9 };
-        let total_needed = topic_header_len + topic.len() + payload_header_len + payload.len();
-
-        if out.len() < total_needed {
+        };
+        let total = th_n + topic.len() + ph_n + payload.len();
+        if out.len() < total {
             return Err(ConnError::BufferTooSmall);
         }
-
         let mut written = 0;
-
-        let hdr_len = encode_message_frame(&mut out[written..], topic.len(), true)
-            .map_err(ConnError::FrameError)?;
-        written += hdr_len;
+        out[written..written + th_n].copy_from_slice(&th[..th_n]);
+        written += th_n;
         out[written..written + topic.len()].copy_from_slice(topic);
         written += topic.len();
-
-        let hdr_len = encode_message_frame(&mut out[written..], payload.len(), false)
-            .map_err(ConnError::FrameError)?;
-        written += hdr_len;
+        out[written..written + ph_n].copy_from_slice(&ph[..ph_n]);
+        written += ph_n;
         out[written..written + payload.len()].copy_from_slice(payload);
         written += payload.len();
-
         Ok(written)
     }
 
