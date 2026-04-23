@@ -185,8 +185,8 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
         }
 
         if self.greeting_pos == GREETING_LEN {
-            let arr_ref: &[u8; 64] = &self.greeting_buf;
-            let peer_greeting = parse_greeting(arr_ref).map_err(ConnError::GreetingError)?;
+            let peer_greeting =
+                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?;
             self.peer_version_minor = peer_greeting.version_minor;
             self.peer_greeting_received = true;
             if self.our_greeting_sent && self.peer_greeting_received {
@@ -249,6 +249,7 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
                 let payload = &body[1 + name_len..];
 
                 if name == b"JOIN" {
+                    // JOIN is best-effort per ZMTP spec; ignore TableFull/GroupTooLong.
                     let _ = self.group_table.join(payload);
                 } else if name == b"LEAVE" {
                     self.group_table.leave(payload);

@@ -163,4 +163,21 @@ mod tests {
         assert_eq!(table.len(), 1);
         assert!(table.matches(b"foo"));
     }
+
+    #[test]
+    fn join_at_max_length_succeeds() {
+        let mut table: GroupTable<8, 4> = GroupTable::new();
+        table.join(b"abcd").unwrap();
+        assert!(table.matches(b"abcd"));
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn leave_at_max_length_removes_group() {
+        let mut table: GroupTable<8, 4> = GroupTable::new();
+        table.join(b"abcd").unwrap();
+        table.leave(b"abcd");
+        assert!(!table.matches(b"abcd"));
+        assert!(table.is_empty());
+    }
 }
