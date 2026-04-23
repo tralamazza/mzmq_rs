@@ -203,6 +203,30 @@ mod tests {
         }
     }
 
+    fn sub_subscribe(prefix: &[u8]) -> alloc::vec::Vec<u8> {
+        let name = b"SUBSCRIBE";
+        let body_len = 1 + name.len() + prefix.len();
+        let mut f = alloc::vec::Vec::new();
+        f.push(0x04);
+        f.push(body_len as u8);
+        f.push(name.len() as u8);
+        f.extend_from_slice(name);
+        f.extend_from_slice(prefix);
+        f
+    }
+
+    async fn make_established(prefix: Option<&[u8]>) -> Driver<8, 32, 512, MockTransport> {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&sub_greeting());
+        peer.extend_from_slice(&sub_ready());
+        if let Some(p) = prefix {
+            peer.extend_from_slice(&sub_subscribe(p));
+        }
+        let mut driver = Driver::<8, 32, 512, _>::new(MockTransport::new(peer)).await.unwrap();
+        while !driver.poll().await.unwrap() {}
+        driver
+    }
+
     #[tokio::test]
     async fn driver_respects_deadlock_rule() {
         let mut peer_bytes = alloc::vec::Vec::new();
@@ -230,5 +254,30 @@ mod tests {
         let written = driver.transport.written();
         assert!(written.len() >= 64 + 27);
         assert_eq!(&written[64..64 + 27], &pub_ready());
+    }
+
+    #[tokio::test]
+    async fn driver_publish_returns_zero_without_subscription() {
+        let mut driver = make_established(None).await;
+        assert_eq!(driver.publish(b"topic", b"payload").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn driver_publish_writes_correct_wire_bytes() {
+        let mut driver = make_established(Some(b"foo")).await;
+        let n = driver.publish(b"foo", b"bar").await.unwrap();
+        assert_eq!(n, 10);
+        let pub_out = &driver.transport.written()[91..];
+        assert_eq!(
+            pub_out,
+            &[0x01, 0x03, b'f', b'o', b'o', 0x00, 0x03, b'b', b'a', b'r']
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_publish_filtered_by_prefix() {
+        let mut driver = make_established(Some(b"foo")).await;
+        assert_eq!(driver.publish(b"bar", b"payload").await.unwrap(), 0);
+        assert!(driver.publish(b"fooX", b"payload").await.unwrap() > 0);
     }
 }
