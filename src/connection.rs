@@ -34,6 +34,7 @@ pub struct Connection<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME
     greeting_pos: usize,
     frame_decoder: FrameDecoder<FRAME_CAP>,
     sub_table: SubTable<SUB_CAP, PREFIX_CAP>,
+    pending_pong: Option<([u8; 16], usize)>,
 }
 
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
@@ -50,6 +51,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
             greeting_pos: 0,
             frame_decoder: FrameDecoder::new(),
             sub_table: SubTable::new(),
+            pending_pong: None,
         }
     }
 
@@ -191,6 +193,13 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
                     let _ = self.sub_table.subscribe(payload);
                 } else if name == b"CANCEL" {
                     self.sub_table.cancel(payload);
+                } else if name == b"PING" {
+                    // payload = ping-ttl(2) + ping-context(0-16); echo context in PONG
+                    let ctx_bytes = payload.get(2..).unwrap_or(&[]);
+                    let ctx_len = ctx_bytes.len().min(16);
+                    let mut ctx = [0u8; 16];
+                    ctx[..ctx_len].copy_from_slice(&ctx_bytes[..ctx_len]);
+                    self.pending_pong = Some((ctx, ctx_len));
                 }
             } else {
                 // ZMTP 3.0 message-based subscription
@@ -266,6 +275,27 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     /// Encode an ERROR command into `out`. Can be called after transitioning to Failed.
     pub fn write_error(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         encode_error(out, b"Invalid socket type").map_err(ConnError::NullError)
+    }
+
+    /// Encode and clear a pending PONG command (queued by a received PING).
+    /// Returns `Ok(None)` when no PONG is pending, `Ok(Some(n))` on success.
+    pub fn write_pong(&mut self, out: &mut [u8]) -> Result<Option<usize>, ConnError> {
+        let Some((ctx, ctx_len)) = self.pending_pong else {
+            return Ok(None);
+        };
+        // body = name-size(1) + "PONG"(4) + context(0-16) — always fits a short frame
+        let body_len = 1 + 4 + ctx_len;
+        let total = 2 + body_len;
+        if out.len() < total {
+            return Err(ConnError::BufferTooSmall);
+        }
+        self.pending_pong = None;
+        out[0] = 0x04; // COMMAND, SHORT, MORE=0
+        out[1] = body_len as u8;
+        out[2] = 4; // name-size "PONG"
+        out[3..7].copy_from_slice(b"PONG");
+        out[7..7 + ctx_len].copy_from_slice(&ctx[..ctx_len]);
+        Ok(Some(total))
     }
 }
 
@@ -523,7 +553,30 @@ mod tests {
         assert_eq!(result, Err(ConnError::WrongState));
     }
 
-    // Test 14: write_error after Failed state returns a valid ERROR frame
+    // Test 14: PING command queues a PONG with the echoed context
+    #[test]
+    fn ping_command_queues_pong_with_context() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        do_handshake(&mut conn);
+
+        // PING: flags=0x04, body-size=0x09, name-size=0x04, "PING", ttl=0x00,0x00, ctx=b"hi"
+        let ping: &[u8] = &[0x04, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i'];
+        conn.feed(ping).unwrap();
+
+        let mut pong_buf = [0u8; 23];
+        let n = conn.write_pong(&mut pong_buf).unwrap().expect("pong pending");
+        // body = name-size(1) + "PONG"(4) + "hi"(2) = 7
+        assert_eq!(n, 9);
+        assert_eq!(pong_buf[0], 0x04); // COMMAND
+        assert_eq!(pong_buf[1], 7);    // body len
+        assert_eq!(pong_buf[2], 4);    // name-size "PONG"
+        assert_eq!(&pong_buf[3..7], b"PONG");
+        assert_eq!(&pong_buf[7..9], b"hi");
+        // second call returns None
+        assert_eq!(conn.write_pong(&mut pong_buf).unwrap(), None);
+    }
+
+    // Test 15: write_error after Failed state returns a valid ERROR frame
     #[test]
     fn write_error_returns_error_frame() {
         let mut conn: Connection<8, 32, 512> = Connection::new();

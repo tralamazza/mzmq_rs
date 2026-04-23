@@ -108,6 +108,14 @@ where
                         }
                     }
 
+                    // Send PONG if PING was received
+                    let mut pong_buf = [0u8; 23];
+                    if let Some(n) = self.conn.write_pong(&mut pong_buf)? {
+                        self.transport
+                            .write_all(&pong_buf[..n])
+                            .map_err(|e| ConnError::IoError(e.kind() as usize))?;
+                    }
+
                     if consumed == 0 {
                         break;
                     }
