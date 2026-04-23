@@ -179,8 +179,8 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
         }
 
         if self.greeting_pos == GREETING_LEN {
-            let arr_ref: &[u8; 64] = &self.greeting_buf;
-            let peer_greeting = parse_greeting(arr_ref).map_err(ConnError::GreetingError)?;
+            let peer_greeting =
+                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?;
             self.peer_version_minor = peer_greeting.version_minor;
             self.peer_greeting_received = true;
             if self.our_greeting_sent && self.peer_greeting_received {

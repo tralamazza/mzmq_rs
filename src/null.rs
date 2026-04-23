@@ -199,9 +199,6 @@ pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocke
 
     let mut pos = 1 + name_len;
     while pos < body.len() {
-        if pos >= body.len() {
-            break;
-        }
         let prop_name_len = body[pos] as usize;
         pos += 1;
         if pos + prop_name_len > body.len() {
