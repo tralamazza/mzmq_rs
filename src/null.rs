@@ -134,12 +134,11 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
 }
 
 /// Encode an ERROR command frame into `buf`.
-/// Frame: flags(0x04) + body-size(1) + name-size(0x05) + "ERROR" + reason-len(2BE) + reason.
+/// Frame: flags(0x04) + body-size(1) + name-size(0x05) + "ERROR" + reason-len(1) + reason.
 /// Returns number of bytes written or `NullError::BufferTooSmall`.
 pub fn encode_error(buf: &mut [u8], reason: &[u8]) -> Result<usize, NullError> {
-    // body = name-size(1) + "ERROR"(5) + reason-len(2) + reason
-    let body_size = 1 + 5 + 2 + reason.len();
-    // body_size must fit the 1-byte short-frame size field.
+    // body = name-size(1) + "ERROR"(5) + reason-len(1) + reason  [RFC 37: short-size = OCTET]
+    let body_size = 1 + 5 + 1 + reason.len();
     if body_size > u8::MAX as usize {
         return Err(NullError::ReasonTooLong);
     }
@@ -151,10 +150,8 @@ pub fn encode_error(buf: &mut [u8], reason: &[u8]) -> Result<usize, NullError> {
     buf[1] = body_size as u8;
     buf[2] = 0x05; // name-size
     buf[3..8].copy_from_slice(b"ERROR");
-    let rlen = reason.len() as u16;
-    buf[8] = (rlen >> 8) as u8;
-    buf[9] = (rlen & 0xFF) as u8;
-    buf[10..10 + reason.len()].copy_from_slice(reason);
+    buf[8] = reason.len() as u8;
+    buf[9..9 + reason.len()].copy_from_slice(reason);
     Ok(total)
 }
 
@@ -264,7 +261,7 @@ mod tests {
     // encode_error rejects reasons that would overflow the 1-byte body size
     #[test]
     fn encode_error_reason_too_long_returns_err() {
-        let reason = [b'x'; 248]; // body_size = 8 + 248 = 256, just over u8::MAX
+        let reason = [b'x'; 249]; // body_size = 7 + 249 = 256, just over u8::MAX
         let mut buf = [0u8; 512];
         assert_eq!(
             encode_error(&mut buf, &reason),
@@ -272,10 +269,10 @@ mod tests {
         );
     }
 
-    // boundary: 247-byte reason fits (body_size == 255)
+    // boundary: 248-byte reason fits (body_size == 255)
     #[test]
     fn encode_error_reason_at_boundary_succeeds() {
-        let reason = [b'x'; 247];
+        let reason = [b'x'; 248];
         let mut buf = [0u8; 512];
         let n = encode_error(&mut buf, &reason).unwrap();
         assert_eq!(buf[1], 0xFF); // body_size = 255
@@ -285,19 +282,18 @@ mod tests {
     // Test 9: encode_error writes correct framing for "Invalid socket type" reason
     #[test]
     fn encode_error_writes_invalid_socket_type_message() {
-        // flags=0x04, size=1+5+2+19=27=0x1B, body: name-size=0x05, "ERROR",
-        // reason-len (2 BE)=0x00 0x13 (19), "Invalid socket type"
+        // flags=0x04, size=1+5+1+19=26=0x1A, body: name-size=0x05, "ERROR",
+        // reason-len(1)=0x13 (19), "Invalid socket type"
         let reason = b"Invalid socket type";
         let mut buf = [0u8; 64];
         let n = encode_error(&mut buf, reason).unwrap();
-        // frame = 2 + 1 + 5 + 2 + 19 = 29 bytes
-        assert_eq!(n, 29);
+        // frame = 2 + 1 + 5 + 1 + 19 = 28 bytes
+        assert_eq!(n, 28);
         assert_eq!(buf[0], 0x04); // flags: COMMAND
-        assert_eq!(buf[1], 0x1B); // size = 27 = 1+5+2+19
+        assert_eq!(buf[1], 0x1A); // size = 26 = 1+5+1+19
         assert_eq!(buf[2], 0x05); // name-size
         assert_eq!(&buf[3..8], b"ERROR"); // command name
-        assert_eq!(buf[8], 0x00); // reason-len high byte
-        assert_eq!(buf[9], 0x13); // reason-len low byte (19)
-        assert_eq!(&buf[10..29], reason); // reason string
+        assert_eq!(buf[8], 0x13); // reason-len = 19
+        assert_eq!(&buf[9..28], reason); // reason string
     }
 }
