@@ -48,33 +48,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache@0.10.0
-
-      - name: Restore sccache cache
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/sccache
-          key: ${{ runner.os }}-sccache-nightly-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-sccache-nightly-
-
-      - run: |
-          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> $GITHUB_ENV
-
       - uses: dtolnay/rust-toolchain@nightly
 
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
 
-      - run: cargo fuzz build
+      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
 
-      - run: cargo fuzz run frame_decoder -- -max_total_time=30
-      - run: cargo fuzz run greeting_parser -- -max_total_time=30
-      - run: cargo fuzz run connection_feed -- -max_total_time=30
+      - run: cargo fuzz run frame_decoder --target x86_64-unknown-linux-gnu -- -max_total_time=30
+      - run: cargo fuzz run greeting_parser --target x86_64-unknown-linux-gnu -- -max_total_time=30
+      - run: cargo fuzz run connection_feed --target x86_64-unknown-linux-gnu -- -max_total_time=30
 
       - uses: actions/upload-artifact@v7
         if: failure()
