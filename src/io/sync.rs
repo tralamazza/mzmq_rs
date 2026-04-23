@@ -95,6 +95,19 @@ where
                 Ok(consumed) => {
                     total_consumed += consumed;
 
+                    // Send greeting rest if we received peer's partial but haven't sent ours
+                    if self.conn.greeting_rest_pending() {
+                        let mut rest = [0u8; 64];
+                        match self.conn.write_greeting_rest(&mut rest) {
+                            Ok(n) => {
+                                self.transport
+                                    .write_all(&rest[..n])
+                                    .map_err(|e| ConnError::IoError(e.kind() as usize))?;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+
                     if *self.conn.state() == State::Ready && !was_ready_before {
                         let mut ready = [0u8; 32];
                         match self.conn.write_ready(&mut ready) {
@@ -235,6 +248,22 @@ mod tests {
         let mut driver = Driver::<8, 32, 512, _>::new(MockTransport::new(peer)).unwrap();
         while !driver.poll().unwrap() {}
         driver
+    }
+
+    #[test]
+    fn driver_sends_partial_greeting_first() {
+        let mut peer_bytes = alloc::vec::Vec::new();
+        peer_bytes.extend_from_slice(&sub_greeting());
+        peer_bytes.extend_from_slice(&sub_ready());
+
+        let transport = MockTransport::new(peer_bytes);
+        let driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
+
+        let written = driver.transport.written();
+        assert_eq!(written.len(), 11);
+        assert_eq!(written[0], 0xFF);
+        assert_eq!(written[9], 0x7F);
+        assert_eq!(written[10], 0x03);
     }
 
     #[test]
