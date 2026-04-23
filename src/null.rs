@@ -130,7 +130,8 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
         }
     }
 
-    Err(NullError::MalformedMetadata)
+    // RFC 37: Socket-Type SHOULD be specified. Absent = unrecognised peer type.
+    Err(NullError::WrongSocketType)
 }
 
 /// Encode an ERROR command frame into `buf`.
@@ -277,6 +278,14 @@ mod tests {
         let n = encode_error(&mut buf, &reason).unwrap();
         assert_eq!(buf[1], 0xFF); // body_size = 255
         assert_eq!(n, 2 + 255);
+    }
+
+    // READY with no Socket-Type metadata returns WrongSocketType (not MalformedMetadata)
+    #[test]
+    fn parse_ready_missing_socket_type_returns_wrong_socket_type() {
+        // flags=0x04, size=0x06, name-size=0x05, "READY" (no metadata)
+        let frame: [u8; 8] = [0x04, 0x06, 0x05, b'R', b'E', b'A', b'D', b'Y'];
+        assert_eq!(parse_ready(&frame), Err(NullError::WrongSocketType));
     }
 
     // Test 9: encode_error writes correct framing for "Invalid socket type" reason
