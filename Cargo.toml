@@ -7,7 +7,7 @@ license = "Apache-2.0"
 description = "Minimal no_std ZMQ (ZMTP 3.1) PUB transport for embedded"
 
 [features]
-default = ["std", "sync"]
+default = ["sync"]
 std = []
 sync = ["dep:embedded-io"]
 async = ["dep:embedded-io-async"]
@@ -16,7 +16,7 @@ alloc-for-tests = ["alloc"]
 python-tests = []
 
 [dependencies]
-heapless = "0.8"
+heapless = "0.9"
 embedded-io = { version = "0.7", optional = true }
 embedded-io-async = { version = "0.7", optional = true }
 

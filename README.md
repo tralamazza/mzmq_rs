@@ -23,7 +23,7 @@ linking libzmq or pulling in `tokio`.
 | `alloc` | Enables `heapless` for subscription table |
 | `python-tests` | Integration tests against real `pyzmq` |
 
-Default: `default = ["std", "sync"]`
+Default: `default = ["sync"]`
 
 ## Usage
 
@@ -54,9 +54,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 See [`examples/pub_hello.rs`](examples/pub_hello.rs) for a runnable version with
 timeouts and error handling.
 
-## RFC 23 (ZMTP 3.1)
+## RFC 37 (ZMTP 3.1)
 
-This implementation follows the [ZMTP 3.1 specification](https://rfc.zeromq.org/spec/23/).
+This implementation follows the [ZMTP 3.1 specification](https://rfc.zeromq.org/spec/37/).
 
 - **Role**: PUB only (publishes to SUB/XSUB peers)
 - **Security**: NULL mechanism only
