@@ -64,14 +64,14 @@ mod tests {
 
     fn valid_sub_greeting() -> [u8; GREETING_LEN] {
         let mut g = [0u8; GREETING_LEN];
-        g[0] = 0xFF;
-        g[9] = 0x7F;
-        g[10] = 0x03;
-        g[11] = 0x01; // ZMTP 3.1
-        g[12] = b'N';
-        g[13] = b'U';
-        g[14] = b'L';
-        g[15] = b'L';
+        g[SIG0] = 0xFF;
+        g[SIG9] = 0x7F;
+        g[VERSION_MAJOR] = 0x03;
+        g[VERSION_MINOR] = 0x01; // ZMTP 3.1
+        g[MECHANISM] = b'N';
+        g[MECHANISM + 1] = b'U';
+        g[MECHANISM + 2] = b'L';
+        g[MECHANISM + 3] = b'L';
         g
     }
 
@@ -79,15 +79,15 @@ mod tests {
     fn emits_64_byte_null_pub_greeting() {
         let mut buf = [0u8; GREETING_LEN];
         encode_greeting(&mut buf);
-        assert_eq!(buf[0], 0xFF);
+        assert_eq!(buf[SIG0], 0xFF);
         assert_eq!(buf[1..9], [0u8; 8]); // padding
-        assert_eq!(buf[9], 0x7F);
-        assert_eq!(buf[10], 0x03); // major
-        assert_eq!(buf[11], 0x01); // minor = ZMTP 3.1
-        assert_eq!(&buf[12..16], b"NULL");
-        assert!(buf[16..32].iter().all(|&b| b == 0)); // mechanism padding
-        assert_eq!(buf[32], 0x00); // as-server
-        assert!(buf[33..64].iter().all(|&b| b == 0)); // filler
+        assert_eq!(buf[SIG9], 0x7F);
+        assert_eq!(buf[VERSION_MAJOR], 0x03); // major
+        assert_eq!(buf[VERSION_MINOR], 0x01); // minor = ZMTP 3.1
+        assert_eq!(&buf[MECHANISM..MECHANISM + 4], b"NULL");
+        assert!(buf[MECHANISM + 4..AS_SERVER].iter().all(|&b| b == 0)); // mechanism padding
+        assert_eq!(buf[AS_SERVER], 0x00); // as-server
+        assert!(buf[AS_SERVER..GREETING_LEN].iter().all(|&b| b == 0)); // filler
     }
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn accepts_version_minor_0() {
         let mut g = valid_sub_greeting();
-        g[11] = 0x00;
+        g[VERSION_MINOR] = 0x00;
         assert_eq!(
             parse_greeting(&g),
             Ok(PeerGreeting {
@@ -116,21 +116,21 @@ mod tests {
     #[test]
     fn rejects_wrong_signature_first_byte() {
         let mut g = valid_sub_greeting();
-        g[0] = 0xFE;
+        g[SIG0] = 0xFE;
         assert_eq!(parse_greeting(&g), Err(GreetingError::InvalidSignature));
     }
 
     #[test]
     fn rejects_wrong_signature_tenth_byte() {
         let mut g = valid_sub_greeting();
-        g[9] = 0x00;
+        g[SIG9] = 0x00;
         assert_eq!(parse_greeting(&g), Err(GreetingError::InvalidSignature));
     }
 
     #[test]
     fn rejects_wrong_version_major() {
         let mut g = valid_sub_greeting();
-        g[10] = 0x02;
+        g[VERSION_MAJOR] = 0x02;
         assert_eq!(
             parse_greeting(&g),
             Err(GreetingError::UnsupportedVersionMajor)
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn rejects_unknown_mechanism() {
         let mut g = valid_sub_greeting();
-        g[12] = b'C'; // "CURVE..."
+        g[MECHANISM] = b'C'; // "CURVE..."
         assert_eq!(parse_greeting(&g), Err(GreetingError::UnsupportedMechanism));
     }
 
@@ -149,14 +149,14 @@ mod tests {
         // "NULL" in bytes 12-15 but non-zero padding in the remaining 16 bytes
         // — must not be accepted as the NULL mechanism.
         let mut g = valid_sub_greeting();
-        g[16] = b'X';
+        g[MECHANISM + 4] = b'X';
         assert_eq!(parse_greeting(&g), Err(GreetingError::UnsupportedMechanism));
     }
 
     #[test]
     fn rejects_nonzero_as_server() {
         let mut g = valid_sub_greeting();
-        g[32] = 0x01;
+        g[AS_SERVER] = 0x01;
         assert_eq!(parse_greeting(&g), Err(GreetingError::InvalidAsServer));
     }
 }
