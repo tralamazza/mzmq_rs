@@ -18,14 +18,15 @@ use embedded_io::{Error, Read, Write};
 /// Internal buffers (not configurable):
 /// - `rx_buf` is 512 bytes — holds handshake bytes and a single inbound
 ///   SUBSCRIBE/CANCEL frame, which fit comfortably at that size.
-/// - A stack-local 1024-byte `tx_buf` in [`Driver::publish`] encodes a
-///   worst-case multipart message (two 9-byte long-frame headers plus both
-///   payloads).
+/// - `tx_buf` is 1024 bytes — staging buffer for outbound publish encoding,
+///   sized for a worst-case multipart message (two 9-byte long-frame headers
+///   plus both payloads).
 pub struct Driver<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T> {
     conn: Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP>,
     transport: T,
     rx_buf: [u8; 512],
     rx_len: usize,
+    tx_buf: [u8; 1024],
 }
 
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T>
@@ -48,6 +49,7 @@ where
             transport,
             rx_buf: [0u8; 512],
             rx_len: 0,
+            tx_buf: [0u8; 1024],
         })
     }
 
@@ -128,11 +130,10 @@ where
 
     /// Publish a message. Returns 0 if no peer subscription matches.
     pub fn publish(&mut self, topic: &[u8], payload: &[u8]) -> Result<usize, ConnError> {
-        let mut tx_buf = [0u8; 1024];
-        let n = self.conn.publish(topic, payload, &mut tx_buf)?;
+        let n = self.conn.publish(topic, payload, &mut self.tx_buf)?;
         if n > 0 {
             self.transport
-                .write_all(&tx_buf[..n])
+                .write_all(&self.tx_buf[..n])
                 .map_err(|e| ConnError::IoError(e.kind() as usize))?;
         }
         Ok(n)
