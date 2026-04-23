@@ -11,6 +11,17 @@ pub const READY_FRAME: [u8; READY_LEN] = [
     0x54, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x03, 0x50, 0x55, 0x42,
 ];
 
+/// Length of the RADIO READY command frame.
+pub const RADIO_READY_LEN: usize = 29;
+
+/// Pre-computed RADIO READY frame:
+/// flags=0x04, size=0x1B (27), name-size=0x05, "READY",
+/// prop name-size=0x0B, "Socket-Type", value-size=0x00000005, "RADIO"
+pub const RADIO_READY_FRAME: [u8; RADIO_READY_LEN] = [
+    0x04, 0x1B, 0x05, 0x52, 0x45, 0x41, 0x44, 0x59, 0x0B, 0x53, 0x6F, 0x63, 0x6B, 0x65, 0x74, 0x2D,
+    0x54, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x05, 0x52, 0x41, 0x44, 0x49, 0x4F,
+];
+
 /// Peer socket types we accept as subscribers.
 #[derive(Debug, PartialEq)]
 pub enum PeerSocketType {
@@ -18,6 +29,8 @@ pub enum PeerSocketType {
     Sub,
     /// XSUB (extended SUB, forwards subscriptions upstream).
     Xsub,
+    /// DISH peer (RADIO-DISH pattern, RFC 48).
+    Dish,
 }
 
 /// Errors from NULL mechanism encode/parse operations.
@@ -49,6 +62,16 @@ pub fn encode_ready(buf: &mut [u8]) -> Result<usize, NullError> {
     Ok(READY_LEN)
 }
 
+/// Encode our RADIO READY frame into `buf`.
+/// Returns the number of bytes written (`RADIO_READY_LEN`) or `NullError::BufferTooSmall`.
+pub fn encode_ready_radio(buf: &mut [u8]) -> Result<usize, NullError> {
+    if buf.len() < RADIO_READY_LEN {
+        return Err(NullError::BufferTooSmall);
+    }
+    buf[..RADIO_READY_LEN].copy_from_slice(&RADIO_READY_FRAME);
+    Ok(RADIO_READY_LEN)
+}
+
 /// Parse a READY (or ERROR) command frame from raw wire bytes.
 /// Returns the peer's socket type if the frame is a valid READY for SUB or XSUB.
 pub fn parse_ready(buf: &[u8]) -> Result<PeerSocketType, NullError> {
@@ -64,6 +87,23 @@ pub fn parse_ready(buf: &[u8]) -> Result<PeerSocketType, NullError> {
     let body = &buf[2..2 + body_size];
 
     parse_ready_from(is_command, body)
+}
+
+/// Parse a RADIO/DISH READY (or ERROR) command frame from raw wire bytes.
+/// Returns the peer's socket type if the frame is a valid READY for DISH.
+pub fn parse_ready_radio(buf: &[u8]) -> Result<PeerSocketType, NullError> {
+    if buf.len() < 3 {
+        return Err(NullError::MalformedMetadata);
+    }
+
+    let is_command = (buf[0] & 0x04) != 0;
+    let body_size = buf[1] as usize;
+    if buf.len() < 2 + body_size {
+        return Err(NullError::MalformedMetadata);
+    }
+    let body = &buf[2..2 + body_size];
+
+    parse_ready_radio_from(is_command, body)
 }
 
 /// Parse a READY (or ERROR) command from structured frame data.
@@ -134,6 +174,66 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
     Err(NullError::WrongSocketType)
 }
 
+/// Parse a RADIO/DISH READY (or ERROR) command from structured frame data.
+/// `is_command` must be true. `body` is the frame body.
+pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType, NullError> {
+    if !is_command {
+        return Err(NullError::NotACommand);
+    }
+
+    if body.is_empty() {
+        return Err(NullError::MalformedMetadata);
+    }
+    let name_len = body[0] as usize;
+    if body.len() < 1 + name_len {
+        return Err(NullError::MalformedMetadata);
+    }
+    let name = &body[1..1 + name_len];
+
+    if name == b"ERROR" {
+        return Err(NullError::PeerError);
+    }
+    if name != b"READY" {
+        return Err(NullError::UnknownCommand);
+    }
+
+    let mut pos = 1 + name_len;
+    while pos < body.len() {
+        if pos >= body.len() {
+            break;
+        }
+        let prop_name_len = body[pos] as usize;
+        pos += 1;
+        if pos + prop_name_len > body.len() {
+            return Err(NullError::MalformedMetadata);
+        }
+        let prop_name = &body[pos..pos + prop_name_len];
+        pos += prop_name_len;
+
+        if pos + 4 > body.len() {
+            return Err(NullError::MalformedMetadata);
+        }
+        let val_len =
+            u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        pos += 4;
+        if pos + val_len > body.len() {
+            return Err(NullError::MalformedMetadata);
+        }
+        let val = &body[pos..pos + val_len];
+        pos += val_len;
+
+        if prop_name_len == 11 && prop_name.eq_ignore_ascii_case(b"Socket-Type") {
+            if val == b"DISH" {
+                return Ok(PeerSocketType::Dish);
+            } else {
+                return Err(NullError::WrongSocketType);
+            }
+        }
+    }
+
+    Err(NullError::WrongSocketType)
+}
+
 /// Encode an ERROR command frame into `buf`.
 /// Frame: flags(0x04) + body-size(1) + name-size(0x05) + "ERROR" + reason-len(1) + reason.
 /// Returns number of bytes written or `NullError::BufferTooSmall`.
@@ -158,7 +258,10 @@ pub fn encode_error(buf: &mut [u8], reason: &[u8]) -> Result<usize, NullError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NullError, PeerSocketType, READY_FRAME, encode_error, encode_ready, parse_ready};
+    use super::{
+        NullError, PeerSocketType, RADIO_READY_FRAME, READY_FRAME, encode_error, encode_ready,
+        encode_ready_radio, parse_ready, parse_ready_radio,
+    };
 
     // Test 1: READY_FRAME constant matches exact 27-byte PUB sequence
     #[test]
@@ -304,5 +407,52 @@ mod tests {
         assert_eq!(&buf[3..8], b"ERROR"); // command name
         assert_eq!(buf[8], 0x13); // reason-len = 19
         assert_eq!(&buf[9..28], reason); // reason string
+    }
+
+    // RADIO tests
+
+    #[test]
+    fn radio_ready_frame_constant_matches_expected_bytes() {
+        let expected: [u8; 29] = [
+            0x04, 0x1B, 0x05, 0x52, 0x45, 0x41, 0x44, 0x59, 0x0B, 0x53, 0x6F, 0x63, 0x6B, 0x65,
+            0x74, 0x2D, 0x54, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x05, 0x52, 0x41, 0x44, 0x49,
+            0x4F,
+        ];
+        assert_eq!(RADIO_READY_FRAME, expected);
+    }
+
+    #[test]
+    fn encode_ready_radio_writes_correct_bytes() {
+        let mut buf = [0u8; 29];
+        let n = encode_ready_radio(&mut buf).unwrap();
+        assert_eq!(n, 29);
+        assert_eq!(buf, RADIO_READY_FRAME);
+    }
+
+    #[test]
+    fn encode_ready_radio_returns_err_on_small_buffer() {
+        let mut buf = [0u8; 28];
+        assert_eq!(encode_ready_radio(&mut buf), Err(NullError::BufferTooSmall));
+    }
+
+    #[test]
+    fn parse_ready_radio_with_dish_returns_dish_socket_type() {
+        // DISH READY: flags=0x04, size=0x1A (26), name-size=0x05, "READY",
+        // prop name-size=0x0B, "Socket-Type", value-size=0x00000004, "DISH"
+        let frame: [u8; 28] = [
+            0x04, 0x1A, 0x05, 0x52, 0x45, 0x41, 0x44, 0x59, 0x0B, 0x53, 0x6F, 0x63, 0x6B, 0x65,
+            0x74, 0x2D, 0x54, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x04, 0x44, 0x49, 0x53, 0x48,
+        ];
+        assert_eq!(parse_ready_radio(&frame), Ok(PeerSocketType::Dish));
+    }
+
+    #[test]
+    fn parse_ready_radio_with_sub_returns_wrong_socket_type() {
+        // Same as parse_ready_sub but through the radio parser
+        let frame: [u8; 27] = [
+            0x04, 0x19, 0x05, 0x52, 0x45, 0x41, 0x44, 0x59, 0x0B, 0x53, 0x6F, 0x63, 0x6B, 0x65,
+            0x74, 0x2D, 0x54, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x03, 0x53, 0x55, 0x42,
+        ];
+        assert_eq!(parse_ready_radio(&frame), Err(NullError::WrongSocketType));
     }
 }

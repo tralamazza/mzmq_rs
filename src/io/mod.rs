@@ -1,7 +1,7 @@
-//! IO adapters for the sans-IO ZMTP 3.1 PUB connection.
+//! IO adapters for the sans-IO ZMTP 3.1 PUB and RADIO connections.
 //!
-//! - `sync`: blocking driver over `embedded_io::Read + Write`
-//! - `async`: future-based driver over `embedded_io_async::Read + Write`
+//! - `sync`: blocking drivers over `embedded_io::Read + Write`
+//! - `async`: future-based drivers over `embedded_io_async::Read + Write`
 
 #[cfg(feature = "sync")]
 pub mod sync;
