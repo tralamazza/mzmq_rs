@@ -1,6 +1,6 @@
 # mzmq
 
-Minimal `no_std` ZMQ (ZMTP 3.1) PUB transport for embedded Rust.
+Minimal `no_std` ZMQ (ZMTP 3.1) PUB and RADIO transport for embedded Rust.
 
 [![Rust CI](https://github.com/tralamazza/mzmq_rs/actions/workflows/ci.yml/badge.svg)](https://github.com/tralamazza/mzmq_rs/actions/workflows/ci.yml)
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-blue)](https://github.com/rust-lang/rust/releases/tag/1.88.0)
@@ -8,10 +8,10 @@ Minimal `no_std` ZMQ (ZMTP 3.1) PUB transport for embedded Rust.
 
 ## Purpose
 
-A tiny, `no_std`, `no_alloc` Rust library that speaks ZMTP 3.1 as a PUB endpoint.
-Designed for embedded Cortex-M-class targets that need to publish telemetry
-to ZMQ-based tooling (dashboards, log collectors, control planes) without
-linking libzmq or pulling in `tokio`.
+A tiny, `no_std`, `no_alloc` Rust library that speaks ZMTP 3.1 as a PUB or RADIO
+endpoint. Designed for embedded Cortex-M-class targets that need to publish
+telemetry to ZMQ-based tooling (dashboards, log collectors, control planes)
+without linking libzmq or pulling in `tokio`.
 
 ## Features
 
@@ -53,14 +53,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 See [`examples/pub_hello.rs`](examples/pub_hello.rs) for a runnable version with
 timeouts and error handling.
 
+### RADIO (RFC 48 / RADIO-DISH)
+
+For the RADIO-DISH pattern, use the `RadioDriver` instead:
+
+```rust
+use embedded_io_adapters::std::FromStd;
+use mzmq::io::sync::RadioDriver;
+use std::net::TcpStream;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let stream = TcpStream::connect("127.0.0.1:5556")?;
+    stream.set_nonblocking(true)?;
+
+    // RadioDriver::<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP, Transport>
+    //   GROUP_CAP      = max simultaneous group memberships
+    //   GROUP_LEN_CAP  = max bytes per group name
+    //   FRAME_CAP      = internal frame decoder buffer size
+    let mut driver = RadioDriver::<8, 32, 1024, _>::new(FromStd::new(stream))?;
+
+    while !driver.poll()? {}
+
+    // Publish. Returns 0 if no peer has joined group `b"alerts"`.
+    driver.publish(b"alerts", b"temperature critical")?;
+    Ok(())
+}
+```
+
+Groups are matched by **exact byte equality** (not prefix matching like PUB-SUB).
+
 ## RFC 37 (ZMTP 3.1)
 
 This implementation follows the [ZMTP 3.1 specification](https://rfc.zeromq.org/spec/37/).
 
-- **Role**: PUB only (publishes to SUB/XSUB peers)
+- **Roles**: PUB (to SUB/XSUB peers) and RADIO (to DISH peers, RFC 48)
 - **Security**: NULL mechanism only
 - **Framing**: Short (≤255 bytes) + long (>255 bytes) frames
 - **Subscriptions**: Parses SUBSCRIBE/CANCEL (3.1) and 0x01/0x00 prefix (3.0)
+- **Groups**: Parses JOIN/LEAVE (RADIO-DISH, RFC 48) with exact matching
 
 ## no_std Operation
 
