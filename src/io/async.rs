@@ -130,9 +130,8 @@ where
         let Some((th, th_n, ph, ph_n)) = self.conn.publish_headers(topic, payload)? else {
             return Ok(0);
         };
-        let io_err = |e: <T as embedded_io_async::ErrorType>::Error| {
-            ConnError::IoError(e.kind() as usize)
-        };
+        let io_err =
+            |e: <T as embedded_io_async::ErrorType>::Error| ConnError::IoError(e.kind() as usize);
         self.transport
             .write_all(&th[..th_n])
             .await
@@ -222,7 +221,9 @@ mod tests {
         if let Some(p) = prefix {
             peer.extend_from_slice(&sub_subscribe(p));
         }
-        let mut driver = Driver::<8, 32, 512, _>::new(MockTransport::new(peer)).await.unwrap();
+        let mut driver = Driver::<8, 32, 512, _>::new(MockTransport::new(peer))
+            .await
+            .unwrap();
         while !driver.poll().await.unwrap() {}
         driver
     }

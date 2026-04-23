@@ -4,6 +4,10 @@ use crate::greeting::{GREETING_LEN, GreetingError, encode_greeting, parse_greeti
 use crate::null::{NullError, READY_LEN, encode_error, encode_ready, parse_ready_from};
 use crate::sub_table::SubTable;
 
+/// Headers returned by [`Connection::publish_headers`]:
+/// `(topic_hdr, topic_hdr_len, payload_hdr, payload_hdr_len)`.
+pub type PublishHeaders = ([u8; MAX_FRAME_HEADER], usize, [u8; MAX_FRAME_HEADER], usize);
+
 /// State of the connection.
 #[derive(Debug, PartialEq)]
 pub enum State {
@@ -215,8 +219,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
         &mut self,
         topic: &[u8],
         payload: &[u8],
-    ) -> Result<Option<([u8; MAX_FRAME_HEADER], usize, [u8; MAX_FRAME_HEADER], usize)>, ConnError>
-    {
+    ) -> Result<Option<PublishHeaders>, ConnError> {
         if self.state != State::Established {
             return Err(ConnError::WrongState);
         }
@@ -224,11 +227,11 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
             return Ok(None);
         }
         let mut th = [0u8; MAX_FRAME_HEADER];
-        let th_n = encode_message_frame(&mut th, topic.len(), true)
-            .map_err(ConnError::FrameError)?;
+        let th_n =
+            encode_message_frame(&mut th, topic.len(), true).map_err(ConnError::FrameError)?;
         let mut ph = [0u8; MAX_FRAME_HEADER];
-        let ph_n = encode_message_frame(&mut ph, payload.len(), false)
-            .map_err(ConnError::FrameError)?;
+        let ph_n =
+            encode_message_frame(&mut ph, payload.len(), false).map_err(ConnError::FrameError)?;
         Ok(Some((th, th_n, ph, ph_n)))
     }
 
