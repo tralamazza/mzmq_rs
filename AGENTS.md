@@ -7,7 +7,7 @@
 
 ## Testing instructions
 - Use TDD (red-green), one test at a time, blackbox testing.
-- Find the CI plan in the .github/workflows/ci.yml folder.
+- Find the CI plan in the .github/workflows folder.
 
 ## Conventions
 - Don't hide confusion.
