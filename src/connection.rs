@@ -29,6 +29,7 @@ pub struct Connection<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME
     state: State,
     our_greeting_sent: bool,
     peer_greeting_received: bool,
+    peer_version_minor: u8,
     our_ready_sent: bool,
     greeting_buf: [u8; 64],
     greeting_pos: usize,
@@ -46,6 +47,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
             state: State::Greeting,
             our_greeting_sent: false,
             peer_greeting_received: false,
+            peer_version_minor: 0,
             our_ready_sent: false,
             greeting_buf: [0u8; 64],
             greeting_pos: 0,
@@ -58,6 +60,11 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     /// Current handshake [`State`] of the connection.
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// Returns the peer's ZMTP version as (major, minor).
+    pub fn peer_version(&self) -> (u8, u8) {
+        (3, self.peer_version_minor)
     }
 }
 
@@ -126,7 +133,8 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
 
         if self.greeting_pos == GREETING_LEN {
             let arr_ref: &[u8; 64] = &self.greeting_buf;
-            parse_greeting(arr_ref).map_err(ConnError::GreetingError)?;
+            let peer_greeting = parse_greeting(arr_ref).map_err(ConnError::GreetingError)?;
+            self.peer_version_minor = peer_greeting.version_minor;
             self.peer_greeting_received = true;
             if self.our_greeting_sent && self.peer_greeting_received {
                 self.state = State::Ready;
@@ -193,8 +201,8 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
                     let _ = self.sub_table.subscribe(payload);
                 } else if name == b"CANCEL" {
                     self.sub_table.cancel(payload);
-                } else if name == b"PING" {
-                    // payload = ping-ttl(2) + ping-context(0-16); echo context in PONG
+                } else if name == b"PING" && self.peer_version_minor >= 1 {
+                    // PING/PONG are ZMTP 3.1 features (RFC 37)
                     let ctx_bytes = payload.get(2..).unwrap_or(&[]);
                     let ctx_len = ctx_bytes.len().min(16);
                     let mut ctx = [0u8; 16];
@@ -560,16 +568,21 @@ mod tests {
         do_handshake(&mut conn);
 
         // PING: flags=0x04, body-size=0x09, name-size=0x04, "PING", ttl=0x00,0x00, ctx=b"hi"
-        let ping: &[u8] = &[0x04, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i'];
+        let ping: &[u8] = &[
+            0x04, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
+        ];
         conn.feed(ping).unwrap();
 
         let mut pong_buf = [0u8; 23];
-        let n = conn.write_pong(&mut pong_buf).unwrap().expect("pong pending");
+        let n = conn
+            .write_pong(&mut pong_buf)
+            .unwrap()
+            .expect("pong pending");
         // body = name-size(1) + "PONG"(4) + "hi"(2) = 7
         assert_eq!(n, 9);
         assert_eq!(pong_buf[0], 0x04); // COMMAND
-        assert_eq!(pong_buf[1], 7);    // body len
-        assert_eq!(pong_buf[2], 4);    // name-size "PONG"
+        assert_eq!(pong_buf[1], 7); // body len
+        assert_eq!(pong_buf[2], 4); // name-size "PONG"
         assert_eq!(&pong_buf[3..7], b"PONG");
         assert_eq!(&pong_buf[7..9], b"hi");
         // second call returns None
@@ -593,5 +606,77 @@ mod tests {
         assert!(n > 0);
         assert_eq!(err_out[0], 0x04);
         assert_eq!(&err_out[3..8], b"ERROR");
+    }
+
+    // Test 16: peer_version returns (3, 1) after handshake with 3.1 peer
+    #[test]
+    fn peer_version_returns_3_1() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        assert_eq!(conn.peer_version(), (3, 0)); // default before handshake
+
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+        conn.feed(&sub_greeting()).unwrap(); // sub_greeting is 3.1
+        assert_eq!(conn.peer_version(), (3, 1));
+    }
+
+    // Test 17: peer_version returns (3, 0) after handshake with 3.0 peer
+    #[test]
+    fn peer_version_returns_3_0() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+
+        // Build a 3.0 greeting (version_minor = 0x00)
+        let mut greeting_30 = sub_greeting();
+        greeting_30[11] = 0x00; // ZMTP 3.0
+        conn.feed(&greeting_30).unwrap();
+
+        assert_eq!(conn.peer_version(), (3, 0));
+    }
+
+    // Test 18: PING from 3.0 peer is ignored (no pending_pong)
+    #[test]
+    fn ping_from_30_peer_ignored() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+
+        // Feed 3.0 greeting
+        let mut greeting_30 = sub_greeting();
+        greeting_30[11] = 0x00;
+        conn.feed(&greeting_30).unwrap();
+
+        // Complete handshake
+        let mut ready_out = [0u8; 32];
+        conn.write_ready(&mut ready_out).unwrap();
+        conn.feed(&sub_ready()).unwrap();
+        assert_eq!(conn.state(), &State::Established);
+
+        // Send PING - should be ignored for 3.0 peer
+        let ping: &[u8] = &[
+            0x04, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
+        ];
+        conn.feed(ping).unwrap();
+
+        // No PONG should be pending
+        let mut pong_buf = [0u8; 23];
+        assert_eq!(conn.write_pong(&mut pong_buf).unwrap(), None);
+    }
+
+    // Test 19: PING from 3.1 peer queues PONG
+    #[test]
+    fn ping_from_31_peer_queues_pong() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        do_handshake(&mut conn);
+        assert_eq!(conn.peer_version(), (3, 1));
+
+        let ping: &[u8] = &[
+            0x04, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
+        ];
+        conn.feed(ping).unwrap();
+
+        let mut pong_buf = [0u8; 23];
+        assert!(conn.write_pong(&mut pong_buf).unwrap().is_some());
     }
 }
