@@ -43,7 +43,11 @@ pub fn parse_greeting(buf: &[u8; GREETING_LEN]) -> Result<PeerGreeting, Greeting
     if buf[VERSION_MAJOR] != 0x03 {
         return Err(GreetingError::UnsupportedVersionMajor);
     }
-    if &buf[MECHANISM..MECHANISM + 4] != b"NULL" {
+    // Mechanism is a 20-byte field: "NULL" padded with zero bytes.
+    // Check all 20 bytes to avoid accepting "NULLCURVE..." as NULL.
+    if !buf[MECHANISM..MECHANISM + 4].eq(b"NULL")
+        || buf[MECHANISM + 4..MECHANISM + 20].iter().any(|&b| b != 0)
+    {
         return Err(GreetingError::UnsupportedMechanism);
     }
     if buf[AS_SERVER] != 0x00 {
@@ -137,6 +141,15 @@ mod tests {
     fn rejects_unknown_mechanism() {
         let mut g = valid_sub_greeting();
         g[12] = b'C'; // "CURVE..."
+        assert_eq!(parse_greeting(&g), Err(GreetingError::UnsupportedMechanism));
+    }
+
+    #[test]
+    fn rejects_mechanism_null_with_nonzero_padding() {
+        // "NULL" in bytes 12-15 but non-zero padding in the remaining 16 bytes
+        // — must not be accepted as the NULL mechanism.
+        let mut g = valid_sub_greeting();
+        g[16] = b'X';
         assert_eq!(parse_greeting(&g), Err(GreetingError::UnsupportedMechanism));
     }
 
