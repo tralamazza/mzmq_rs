@@ -8,13 +8,18 @@ pub enum FrameError {
 }
 
 /// Writes a MESSAGE frame header into `buf[..header_len]`.
-/// Returns Ok(header_len) on success, Err if buf too small or flags are invalid.
+/// Returns `Ok(header_len)` on success, Err if buf too small or flags are invalid.
+///
+/// # Errors
+/// Returns `FrameError::BufferTooSmall` if `buf` cannot hold the header.
+/// Returns `FrameError::ReservedFlagBits` if flags are invalid.
+#[allow(clippy::cast_possible_truncation)]
 pub fn encode_message_frame(
     buf: &mut [u8],
     body_len: usize,
     more: bool,
 ) -> Result<usize, FrameError> {
-    let more_bit: u8 = if more { 0x01 } else { 0x00 };
+    let more_bit: u8 = u8::from(more);
     if body_len <= 255 {
         if buf.len() < 2 {
             return Err(FrameError::BufferTooSmall);
@@ -34,7 +39,11 @@ pub fn encode_message_frame(
 }
 
 /// Writes a COMMAND frame header into `buf[..header_len]`.
-/// Returns Ok(header_len). Body must be written by the caller after the header.
+/// Returns `Ok(header_len)`. Body must be written by the caller after the header.
+///
+/// # Errors
+/// Returns `FrameError::BufferTooSmall` if `buf` cannot hold the header.
+#[allow(clippy::cast_possible_truncation)]
 pub fn encode_command_frame(buf: &mut [u8], body_len: usize) -> Result<usize, FrameError> {
     if body_len <= 255 {
         if buf.len() < 2 {
@@ -140,6 +149,12 @@ impl<const CAP: usize> FrameDecoder<CAP> {
     /// - `Ok((consumed, Some(frame)))` — frame is complete; `consumed` bytes were used.
     /// - `Ok((consumed, None))` — more bytes needed; all `input` bytes were consumed.
     /// - `Err(DecodeError)` — invalid frame; decoder is now poisoned.
+    ///
+    /// # Errors
+    /// Returns `DecodeError::ReservedFlagBits` if the flags byte has reserved bits set.
+    /// Returns `DecodeError::BodyTooLarge` if the decoded body length exceeds the decoder's capacity `CAP`.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::too_many_lines)]
     pub fn feed<'a>(
         &'a mut self,
         input: &[u8],
@@ -269,6 +284,7 @@ impl<const CAP: usize> FrameDecoder<CAP> {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
 mod tests {
     use super::{
         DecodedFrame, FrameDecoder, FrameError, decode_error::DecodeError, encode_command_frame,
@@ -470,7 +486,7 @@ mod tests {
                     assert_eq!(frame.body[i], (i & 0xFF) as u8);
                 }
             }
-            other => panic!("unexpected result: {:?}", other),
+            other => panic!("unexpected result: {other:?}"),
         }
     }
 

@@ -44,6 +44,7 @@ pub enum State {
 /// `A` = authenticator type; use the default `()` for the NULL mechanism,
 ///       or supply an [`Authenticator`](crate::plain::Authenticator) and construct via
 ///       [`RadioConnection::new_plain`] for the PLAIN mechanism (requires the `plain` feature).
+#[allow(clippy::struct_excessive_bools)]
 pub struct RadioConnection<
     const GROUP_CAP: usize,
     const GROUP_LEN_CAP: usize,
@@ -153,7 +154,11 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
 
     /// Write the first 11 bytes of our greeting (signature + version major) into `out`.
     /// Call once after creating the connection.
-    /// Returns Ok(GREETING_PARTIAL_LEN) or Err if not in Greeting state or buf too small.
+    /// Returns `Ok(GREETING_PARTIAL_LEN)` or Err if not in Greeting state or buf too small.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Greeting` state or already sent.
+    /// Returns `ConnError::BufferTooSmall` if `out` is smaller than `GREETING_PARTIAL_LEN`.
     pub fn write_greeting(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         if self.state != State::Greeting || self.our_greeting_partial_sent {
             return Err(ConnError::WrongState);
@@ -171,7 +176,11 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
     /// Write the remaining 53 bytes of our greeting into `out`.
     /// Call after receiving the peer's partial greeting (11 bytes).
     /// If the peer's full greeting is already received, transitions state to Ready (NULL)
-    /// or PlainHello (PLAIN).
+    /// or `PlainHello` (PLAIN).
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in the correct handshake state.
+    /// Returns `ConnError::BufferTooSmall` if `out` is smaller than the remaining greeting bytes.
     pub fn write_greeting_rest(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         if self.state != State::Greeting
             || !self.our_greeting_partial_sent
@@ -222,7 +231,11 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
 
     /// Write our RADIO READY command into `out`. Call after receiving a valid peer greeting.
     /// For PLAIN, `write_welcome` must be called first.
-    /// Returns Ok(RADIO_READY_LEN) or Err.
+    /// Returns `Ok(RADIO_READY_LEN)` or Err.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Ready` state (or `PlainReady` for PLAIN).
+    /// Returns `ConnError::BufferTooSmall` if `out` is smaller than `RADIO_READY_LEN`.
     pub fn write_ready(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         #[cfg(not(feature = "plain"))]
         let in_ready_state = self.state == State::Ready;
@@ -245,7 +258,14 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
 
     /// Feed incoming bytes from the peer into the connection.
     /// Drives the handshake and, once established, processes incoming group frames.
-    /// Returns Ok(consumed) — may be less than input.len() if a frame boundary was hit.
+    /// Returns Ok(consumed) — may be less than `input.len()` if a frame boundary was hit.
+    ///
+    /// # Errors
+    /// Returns `ConnError::GreetingError` if the peer greeting is invalid.
+    /// Returns `ConnError::NullError` if the READY/ERROR handshake fails.
+    /// Returns `ConnError::PlainError` if PLAIN authentication fails.
+    /// Returns `ConnError::DecodeError` if an inbound frame is malformed.
+    /// Returns `ConnError::WrongState` if the connection is in `Failed` state.
     pub fn feed(&mut self, input: &[u8]) -> Result<usize, ConnError> {
         match self.state {
             State::Greeting => self.feed_greeting(input),
@@ -353,7 +373,7 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
                 if body.len() < 1 + name_len {
                     return Ok(consumed);
                 }
-                let name = &body[1..1 + name_len];
+                let name = &body[1..=name_len];
                 let payload = &body[1 + name_len..];
 
                 if name == b"JOIN" {
@@ -377,6 +397,10 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
 
     /// Encode the two ZMTP frame headers for a publish, after checking group membership.
     /// Returns `Ok(None)` if no peer has joined `group`; `Ok(Some(...))` otherwise.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Established` state.
+    /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub fn publish_headers(
         &mut self,
         group: &[u8],
@@ -400,6 +424,11 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
     /// Publish a message to the peer. Only valid in Established state.
     /// Encodes a multipart message (MORE frame for group, LAST frame for body).
     /// Returns Ok(0) if the peer has not joined `group`.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Established` state.
+    /// Returns `ConnError::BufferTooSmall` if `out` cannot hold the encoded message.
+    /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub fn publish(
         &mut self,
         group: &[u8],
@@ -426,12 +455,19 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
     }
 
     /// Encode an ERROR command into `out`. Can be called after transitioning to Failed.
+    ///
+    /// # Errors
+    /// Returns `ConnError::NullError` if the ERROR frame cannot be encoded.
     pub fn write_error(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         encode_error(out, b"Invalid socket type").map_err(ConnError::NullError)
     }
 
     /// Encode and clear a pending PONG command (queued by a received PING).
     /// Returns `Ok(None)` when no PONG is pending, `Ok(Some(n))` on success.
+    ///
+    /// # Errors
+    /// Returns `ConnError::BufferTooSmall` if `out` cannot hold the encoded PONG frame.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn write_pong(&mut self, out: &mut [u8]) -> Result<Option<usize>, ConnError> {
         let Some((ctx, ctx_len)) = self.pending_pong else {
             return Ok(None);
@@ -452,6 +488,10 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
 
     /// Encode a WELCOME command into `out`. Must be called after `feed` transitions to
     /// `PlainReady`, and before `write_ready`.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `PlainReady` state or already sent.
+    /// Returns `ConnError::PlainError` if the WELCOME frame cannot be encoded.
     #[cfg(feature = "plain")]
     pub fn write_welcome(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         if self.state != State::PlainReady || self.our_welcome_sent {
@@ -549,6 +589,7 @@ impl ConnError {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
     use crate::null::{NullError, RADIO_READY_LEN};

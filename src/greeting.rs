@@ -1,7 +1,7 @@
 /// Fixed size of a ZMTP 3.1 greeting frame in bytes.
 pub const GREETING_LEN: usize = 64;
 /// Number of bytes in the partial greeting (signature + version major).
-/// VERSION_MAJOR is the index of that byte, so +1 gives the length.
+/// `VERSION_MAJOR` is the index of that byte, so +1 gives the length.
 pub const GREETING_PARTIAL_LEN: usize = VERSION_MAJOR + 1;
 
 const SIG0: usize = 0;
@@ -52,7 +52,11 @@ pub fn encode_plain_greeting(buf: &mut [u8; GREETING_LEN]) {
 }
 
 /// Validates the first 11 bytes of a ZMTP greeting (signature + version major).
-/// Call this as soon as GREETING_PARTIAL_LEN bytes are buffered to fail fast on bad peers.
+/// Call this as soon as `GREETING_PARTIAL_LEN` bytes are buffered to fail fast on bad peers.
+///
+/// # Errors
+/// Returns `GreetingError::InvalidSignature` if the signature bytes don't match.
+/// Returns `GreetingError::UnsupportedVersionMajor` if the major version is not 3.
 pub fn parse_partial_greeting(buf: &[u8; GREETING_PARTIAL_LEN]) -> Result<(), GreetingError> {
     if buf[SIG0] != 0xFF || buf[SIG9] != 0x7F {
         return Err(GreetingError::InvalidSignature);
@@ -64,6 +68,12 @@ pub fn parse_partial_greeting(buf: &[u8; GREETING_PARTIAL_LEN]) -> Result<(), Gr
 }
 
 /// Parses a 64-byte greeting from a peer. Returns the peer's version minor.
+///
+/// # Errors
+/// Returns `GreetingError::InvalidSignature` if the signature bytes don't match.
+/// Returns `GreetingError::UnsupportedVersionMajor` if the major version is not 3.
+/// Returns `GreetingError::UnsupportedMechanism` if the mechanism is not "NULL".
+/// Returns `GreetingError::InvalidAsServer` if the `as_server` byte is non-zero.
 pub fn parse_greeting(buf: &[u8; GREETING_LEN]) -> Result<PeerGreeting, GreetingError> {
     if buf[SIG0] != 0xFF || buf[SIG9] != 0x7F {
         return Err(GreetingError::InvalidSignature);
@@ -88,6 +98,12 @@ pub fn parse_greeting(buf: &[u8; GREETING_LEN]) -> Result<PeerGreeting, Greeting
 
 /// Parses a 64-byte PLAIN greeting from a client peer.
 /// Expects mechanism="PLAIN" and `as_server=0` (client role).
+///
+/// # Errors
+/// Returns `GreetingError::InvalidSignature` if the signature bytes don't match.
+/// Returns `GreetingError::UnsupportedVersionMajor` if the major version is not 3.
+/// Returns `GreetingError::UnsupportedMechanism` if the mechanism is not "PLAIN".
+/// Returns `GreetingError::InvalidAsServer` if the `as_server` byte is non-zero.
 #[cfg(feature = "plain")]
 pub fn parse_plain_greeting(buf: &[u8; GREETING_LEN]) -> Result<PeerGreeting, GreetingError> {
     if buf[SIG0] != 0xFF || buf[SIG9] != 0x7F {

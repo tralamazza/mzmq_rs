@@ -62,6 +62,9 @@ const WELCOME_FRAME: [u8; WELCOME_LEN] =
 
 /// Encode a WELCOME command into `buf`.
 /// Returns the number of bytes written (`WELCOME_LEN`) or `PlainError::BufferTooSmall`.
+///
+/// # Errors
+/// Returns `PlainError::BufferTooSmall` if `buf` is smaller than `WELCOME_LEN`.
 pub fn encode_welcome(buf: &mut [u8]) -> Result<usize, PlainError> {
     if buf.len() < WELCOME_LEN {
         return Err(PlainError::BufferTooSmall);
@@ -73,7 +76,13 @@ pub fn encode_welcome(buf: &mut [u8]) -> Result<usize, PlainError> {
 /// Parse a HELLO command from structured frame data.
 /// Returns `(username, password)` slices into `body` on success.
 ///
-/// HELLO body layout: name_len(1) + "HELLO"(5) + username_len(1) + username + password_len(1) + password
+/// HELLO body layout: `name_len(1)` + "HELLO"(5) + `username_len(1)` + username + `password_len(1)` + password
+///
+/// # Errors
+/// Returns `PlainError::NotACommand` if `is_command` is false.
+/// Returns `PlainError::MalformedHello` if the body is structurally invalid.
+/// Returns `PlainError::PeerError` if the command name is "ERROR".
+/// Returns `PlainError::UnknownCommand` if the command name is not "HELLO" or "ERROR".
 pub fn parse_hello_from(is_command: bool, body: &[u8]) -> Result<(&[u8], &[u8]), PlainError> {
     if !is_command {
         return Err(PlainError::NotACommand);
@@ -85,7 +94,7 @@ pub fn parse_hello_from(is_command: bool, body: &[u8]) -> Result<(&[u8], &[u8]),
     if body.len() < 1 + name_len {
         return Err(PlainError::MalformedHello);
     }
-    let name = &body[1..1 + name_len];
+    let name = &body[1..=name_len];
     if name == b"ERROR" {
         return Err(PlainError::PeerError);
     }
@@ -119,6 +128,7 @@ pub fn parse_hello_from(is_command: bool, body: &[u8]) -> Result<(&[u8], &[u8]),
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
 

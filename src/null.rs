@@ -54,6 +54,9 @@ pub enum NullError {
 
 /// Encode our PUB READY frame into `buf`.
 /// Returns the number of bytes written (`READY_LEN`) or `NullError::BufferTooSmall`.
+///
+/// # Errors
+/// Returns `NullError::BufferTooSmall` if `buf` is smaller than `READY_LEN`.
 pub fn encode_ready(buf: &mut [u8]) -> Result<usize, NullError> {
     if buf.len() < READY_LEN {
         return Err(NullError::BufferTooSmall);
@@ -64,6 +67,9 @@ pub fn encode_ready(buf: &mut [u8]) -> Result<usize, NullError> {
 
 /// Encode our RADIO READY frame into `buf`.
 /// Returns the number of bytes written (`RADIO_READY_LEN`) or `NullError::BufferTooSmall`.
+///
+/// # Errors
+/// Returns `NullError::BufferTooSmall` if `buf` is smaller than `RADIO_READY_LEN`.
 pub fn encode_ready_radio(buf: &mut [u8]) -> Result<usize, NullError> {
     if buf.len() < RADIO_READY_LEN {
         return Err(NullError::BufferTooSmall);
@@ -74,6 +80,13 @@ pub fn encode_ready_radio(buf: &mut [u8]) -> Result<usize, NullError> {
 
 /// Parse a READY (or ERROR) command frame from raw wire bytes.
 /// Returns the peer's socket type if the frame is a valid READY for SUB or XSUB.
+///
+/// # Errors
+/// Returns `NullError::MalformedMetadata` if the frame is too short or structurally invalid.
+/// Returns `NullError::NotACommand` if the COMMAND flag bit is not set.
+/// Returns `NullError::PeerError` if the command name is "ERROR".
+/// Returns `NullError::UnknownCommand` if the command name is not "READY" or "ERROR".
+/// Returns `NullError::WrongSocketType` if the Socket-Type is not "SUB" or "XSUB".
 pub fn parse_ready(buf: &[u8]) -> Result<PeerSocketType, NullError> {
     if buf.len() < 3 {
         return Err(NullError::MalformedMetadata);
@@ -91,6 +104,13 @@ pub fn parse_ready(buf: &[u8]) -> Result<PeerSocketType, NullError> {
 
 /// Parse a RADIO/DISH READY (or ERROR) command frame from raw wire bytes.
 /// Returns the peer's socket type if the frame is a valid READY for DISH.
+///
+/// # Errors
+/// Returns `NullError::MalformedMetadata` if the frame is too short or structurally invalid.
+/// Returns `NullError::NotACommand` if the COMMAND flag bit is not set.
+/// Returns `NullError::PeerError` if the command name is "ERROR".
+/// Returns `NullError::UnknownCommand` if the command name is not "READY" or "ERROR".
+/// Returns `NullError::WrongSocketType` if the Socket-Type is not "DISH".
 pub fn parse_ready_radio(buf: &[u8]) -> Result<PeerSocketType, NullError> {
     if buf.len() < 3 {
         return Err(NullError::MalformedMetadata);
@@ -108,6 +128,13 @@ pub fn parse_ready_radio(buf: &[u8]) -> Result<PeerSocketType, NullError> {
 
 /// Parse a READY (or ERROR) command from structured frame data.
 /// `is_command` must be true (COMMAND flag bit set). `body` is the frame body.
+///
+/// # Errors
+/// Returns `NullError::NotACommand` if `is_command` is false.
+/// Returns `NullError::MalformedMetadata` if the body is too short or structurally invalid.
+/// Returns `NullError::PeerError` if the command name is "ERROR".
+/// Returns `NullError::UnknownCommand` if the command name is not "READY" or "ERROR".
+/// Returns `NullError::WrongSocketType` if the Socket-Type is not "SUB" or "XSUB".
 pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType, NullError> {
     if !is_command {
         return Err(NullError::NotACommand);
@@ -121,7 +148,7 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
     if body.len() < 1 + name_len {
         return Err(NullError::MalformedMetadata);
     }
-    let name = &body[1..1 + name_len];
+    let name = &body[1..=name_len];
 
     if name == b"ERROR" {
         return Err(NullError::PeerError);
@@ -164,9 +191,8 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
                 return Ok(PeerSocketType::Sub);
             } else if val == b"XSUB" {
                 return Ok(PeerSocketType::Xsub);
-            } else {
-                return Err(NullError::WrongSocketType);
             }
+            return Err(NullError::WrongSocketType);
         }
     }
 
@@ -176,6 +202,13 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
 
 /// Parse a RADIO/DISH READY (or ERROR) command from structured frame data.
 /// `is_command` must be true. `body` is the frame body.
+///
+/// # Errors
+/// Returns `NullError::NotACommand` if `is_command` is false.
+/// Returns `NullError::MalformedMetadata` if the body is too short or structurally invalid.
+/// Returns `NullError::PeerError` if the command name is "ERROR".
+/// Returns `NullError::UnknownCommand` if the command name is not "READY" or "ERROR".
+/// Returns `NullError::WrongSocketType` if the Socket-Type is not "DISH".
 pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType, NullError> {
     if !is_command {
         return Err(NullError::NotACommand);
@@ -188,7 +221,7 @@ pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocke
     if body.len() < 1 + name_len {
         return Err(NullError::MalformedMetadata);
     }
-    let name = &body[1..1 + name_len];
+    let name = &body[1..=name_len];
 
     if name == b"ERROR" {
         return Err(NullError::PeerError);
@@ -222,9 +255,8 @@ pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocke
         if prop_name_len == 11 && prop_name.eq_ignore_ascii_case(b"Socket-Type") {
             if val == b"DISH" {
                 return Ok(PeerSocketType::Dish);
-            } else {
-                return Err(NullError::WrongSocketType);
             }
+            return Err(NullError::WrongSocketType);
         }
     }
 
@@ -234,6 +266,11 @@ pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocke
 /// Encode an ERROR command frame into `buf`.
 /// Frame: flags(0x04) + body-size(1) + name-size(0x05) + "ERROR" + reason-len(1) + reason.
 /// Returns number of bytes written or `NullError::BufferTooSmall`.
+///
+/// # Errors
+/// Returns `NullError::ReasonTooLong` if the reason exceeds 248 bytes.
+/// Returns `NullError::BufferTooSmall` if `buf` cannot hold the encoded frame.
+#[allow(clippy::cast_possible_truncation)]
 pub fn encode_error(buf: &mut [u8], reason: &[u8]) -> Result<usize, NullError> {
     // body = name-size(1) + "ERROR"(5) + reason-len(1) + reason  [RFC 37: short-size = OCTET]
     let body_size = 1 + 5 + 1 + reason.len();

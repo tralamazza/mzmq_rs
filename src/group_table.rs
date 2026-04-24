@@ -39,12 +39,20 @@ impl<const MAX_ENTRIES: usize, const MAX_GROUP_LEN: usize> GroupTable<MAX_ENTRIE
     ///
     /// Returns `Err` if the table is full or the group exceeds `MAX_GROUP_LEN`.
     /// Silently succeeds (no duplicate added) if the group is already present.
+    ///
+    /// # Panics
+    /// Panics if `group.len() <= MAX_GROUP_LEN` but the internal `Vec` fails to extend
+    /// (should be impossible given the length check).
+    ///
+    /// # Errors
+    /// Returns `GroupError::GroupTooLong` if the group exceeds `MAX_GROUP_LEN`.
+    /// Returns `GroupError::TableFull` if the table already holds `MAX_ENTRIES` groups.
     pub fn join(&mut self, group: &[u8]) -> Result<(), GroupError> {
         if group.len() > MAX_GROUP_LEN {
             return Err(GroupError::GroupTooLong);
         }
         // Duplicate detection — skip if already present.
-        for entry in self.entries.iter() {
+        for entry in &self.entries {
             if entry.as_slice() == group {
                 return Ok(());
             }

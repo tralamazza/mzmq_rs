@@ -67,6 +67,7 @@ pub(crate) fn radio_ready() -> [u8; 29] {
 extern crate alloc;
 
 /// Build a ZMTP 3.1 SUBSCRIBE command frame for the given prefix.
+#[allow(clippy::cast_possible_truncation)]
 pub(crate) fn sub_subscribe(prefix: &[u8]) -> alloc::vec::Vec<u8> {
     let name = b"SUBSCRIBE";
     let body_len = 1 + name.len() + prefix.len();
@@ -80,6 +81,7 @@ pub(crate) fn sub_subscribe(prefix: &[u8]) -> alloc::vec::Vec<u8> {
 }
 
 /// Build a ZMTP 3.1 JOIN command frame for the given group.
+#[allow(clippy::cast_possible_truncation)]
 pub(crate) fn dish_join(group: &[u8]) -> alloc::vec::Vec<u8> {
     let name = b"JOIN";
     let body_len = 1 + name.len() + group.len();

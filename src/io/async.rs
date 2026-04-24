@@ -31,6 +31,10 @@ where
     T: Read + Write,
 {
     /// Create a new driver. Sends our greeting immediately.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
+    /// Returns `ConnError::IoError` if the transport write fails.
     pub async fn new(mut transport: T) -> Result<Self, ConnError> {
         let mut conn = Connection::new();
 
@@ -51,6 +55,11 @@ where
 
     /// Drive the connection one step. Returns `Ok(true)` when the connection
     /// is `Established`.
+    ///
+    /// # Errors
+    /// Returns `ConnError::IoError` if the transport read/write fails or EOF is reached.
+    /// Returns `ConnError::WrongState` if the connection is in an invalid state.
+    /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub async fn poll(&mut self) -> Result<bool, ConnError> {
         if *self.conn.state() == State::Ready {
             let mut ready = [0u8; 32];
@@ -157,6 +166,11 @@ where
     }
 
     /// Publish a message. Returns 0 if no peer subscription matches.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Established` state.
+    /// Returns `ConnError::IoError` if the transport write fails.
+    /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub async fn publish(&mut self, topic: &[u8], payload: &[u8]) -> Result<usize, ConnError> {
         let Some((th, th_n, ph, ph_n)) = self.conn.publish_headers(topic, payload)? else {
             return Ok(0);
@@ -233,7 +247,7 @@ mod tests {
                     break;
                 }
                 Ok(false) => {}
-                Err(e) => panic!("poll failed: {:?}", e),
+                Err(e) => panic!("poll failed: {e:?}"),
             }
         }
 
@@ -300,6 +314,10 @@ where
     T: Read + Write,
 {
     /// Create a new async RADIO driver. Sends our greeting immediately.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
+    /// Returns `ConnError::IoError` if the transport write fails.
     pub async fn new(mut transport: T) -> Result<Self, crate::radio_connection::ConnError> {
         let mut conn = crate::radio_connection::RadioConnection::new();
 
@@ -320,6 +338,11 @@ where
 
     /// Drive the connection one step. Returns `Ok(true)` when the connection
     /// is `Established`.
+    ///
+    /// # Errors
+    /// Returns `ConnError::IoError` if the transport read/write fails or EOF is reached.
+    /// Returns `ConnError::WrongState` if the connection is in an invalid state.
+    /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub async fn poll(&mut self) -> Result<bool, crate::radio_connection::ConnError> {
         use crate::radio_connection::State;
 
@@ -424,6 +447,11 @@ where
     }
 
     /// Publish a message to the group. Returns 0 if the peer has not joined the group.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Established` state.
+    /// Returns `ConnError::IoError` if the transport write fails.
+    /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub async fn publish(
         &mut self,
         group: &[u8],
@@ -505,7 +533,7 @@ mod radio_tests {
                     break;
                 }
                 Ok(false) => {}
-                Err(e) => panic!("poll failed: {:?}", e),
+                Err(e) => panic!("poll failed: {e:?}"),
             }
         }
 

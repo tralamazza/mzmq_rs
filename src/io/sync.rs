@@ -31,6 +31,10 @@ where
     T: Read + Write,
 {
     /// Create a new driver. Sends our greeting immediately.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
+    /// Returns `ConnError::IoError` if the transport write fails.
     pub fn new(mut transport: T) -> Result<Self, ConnError> {
         let mut conn = Connection::new();
 
@@ -51,6 +55,11 @@ where
     /// Drive the connection one step. Blocks on `transport.read` when there is
     /// no buffered data left to process. Returns `Ok(true)` when the connection
     /// is `Established`.
+    ///
+    /// # Errors
+    /// Returns `ConnError::IoError` if the transport read/write fails or EOF is reached.
+    /// Returns `ConnError::WrongState` if the connection is in an invalid state.
+    /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub fn poll(&mut self) -> Result<bool, ConnError> {
         if *self.conn.state() == State::Ready {
             let mut ready = [0u8; 32];
@@ -153,6 +162,11 @@ where
     }
 
     /// Publish a message. Returns 0 if no peer subscription matches.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Established` state.
+    /// Returns `ConnError::IoError` if the transport write fails.
+    /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub fn publish(&mut self, topic: &[u8], payload: &[u8]) -> Result<usize, ConnError> {
         let Some((th, th_n, ph, ph_n)) = self.conn.publish_headers(topic, payload)? else {
             return Ok(0);
@@ -240,7 +254,7 @@ mod tests {
                     break;
                 }
                 Ok(false) => {}
-                Err(e) => panic!("poll failed: {:?}", e),
+                Err(e) => panic!("poll failed: {e:?}"),
             }
         }
 
@@ -309,11 +323,11 @@ mod tests {
         // partial(11) + rest(53) + pub_ready(27) = 91 bytes, then PONG(9)
         let written = driver.transport.written();
         assert!(written.len() >= 100);
-        let pong = &written[91..100];
-        assert_eq!(pong[0], 0x04); // COMMAND
-        assert_eq!(pong[1], 7); // body len = 1+4+2
-        assert_eq!(&pong[2..7], &[0x04, b'P', b'O', b'N', b'G']);
-        assert_eq!(&pong[7..9], b"hi");
+        let pong_frame = &written[91..100];
+        assert_eq!(pong_frame[0], 0x04); // COMMAND
+        assert_eq!(pong_frame[1], 7); // body len = 1+4+2
+        assert_eq!(&pong_frame[2..7], &[0x04, b'P', b'O', b'N', b'G']);
+        assert_eq!(&pong_frame[7..9], b"hi");
     }
 
     #[test]
@@ -368,6 +382,10 @@ where
     T: Read + Write,
 {
     /// Create a new RADIO driver. Sends our greeting immediately.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
+    /// Returns `ConnError::IoError` if the transport write fails.
     pub fn new(mut transport: T) -> Result<Self, crate::radio_connection::ConnError> {
         let mut conn = crate::radio_connection::RadioConnection::new();
 
@@ -388,6 +406,11 @@ where
     /// Drive the connection one step. Blocks on `transport.read` when there is
     /// no buffered data left to process. Returns `Ok(true)` when the connection
     /// is `Established`.
+    ///
+    /// # Errors
+    /// Returns `ConnError::IoError` if the transport read/write fails or EOF is reached.
+    /// Returns `ConnError::WrongState` if the connection is in an invalid state.
+    /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub fn poll(&mut self) -> Result<bool, crate::radio_connection::ConnError> {
         use crate::radio_connection::State;
 
@@ -489,6 +512,11 @@ where
     }
 
     /// Publish a message to the group. Returns 0 if the peer has not joined the group.
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if not in `Established` state.
+    /// Returns `ConnError::IoError` if the transport write fails.
+    /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub fn publish(
         &mut self,
         group: &[u8],
@@ -581,7 +609,7 @@ mod radio_tests {
                     break;
                 }
                 Ok(false) => {}
-                Err(e) => panic!("poll failed: {:?}", e),
+                Err(e) => panic!("poll failed: {e:?}"),
             }
         }
 
@@ -653,11 +681,11 @@ mod radio_tests {
         // partial(11) + rest(53) + radio_ready(29) = 93 bytes, then PONG(9)
         let written = driver.transport.written();
         assert!(written.len() >= 102);
-        let pong = &written[93..102];
-        assert_eq!(pong[0], 0x04); // COMMAND
-        assert_eq!(pong[1], 7); // body len = 1+4+2
-        assert_eq!(&pong[2..7], &[0x04, b'P', b'O', b'N', b'G']);
-        assert_eq!(&pong[7..9], b"hi");
+        let pong_frame = &written[93..102];
+        assert_eq!(pong_frame[0], 0x04); // COMMAND
+        assert_eq!(pong_frame[1], 7); // body len = 1+4+2
+        assert_eq!(&pong_frame[2..7], &[0x04, b'P', b'O', b'N', b'G']);
+        assert_eq!(&pong_frame[7..9], b"hi");
     }
 
     #[test]
