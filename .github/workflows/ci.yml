@@ -41,7 +41,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
 
       - run: uv sync
-      - run: cargo test --features python-tests -- --test-threads=1
+      - run: cargo test --features python-tests,plain -- --test-threads=1
 
   fuzz:
     runs-on: ubuntu-latest
