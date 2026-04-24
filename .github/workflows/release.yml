@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/rust-setup
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "mzmq"))')
+          if [ "$TAG" != "$CRATE_VERSION" ]; then
+            echo "::error::Tag v$TAG does not match Cargo.toml version $CRATE_VERSION"
+            exit 1
+          fi
+
+      - run: cargo test --features async,plain,std
+
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag

@@ -128,3 +128,18 @@ Run the integration tests against a live `pyzmq >= 26` process:
 uv sync
 cargo test --features python-tests -- --test-threads=1
 ```
+
+## Releasing
+
+Releases are automated via [`cargo-release`](https://github.com/crate-ci/cargo-release).
+
+```bash
+cargo install cargo-release
+cargo release patch --execute   # or: minor / major / <x.y.z>
+```
+
+This bumps the version in `Cargo.toml`, commits, tags `vX.Y.Z`, and pushes. The
+`Release` workflow then publishes to crates.io and creates a GitHub Release.
+
+Required secret on the repo: `CARGO_REGISTRY_TOKEN` (crates.io API token with
+publish scope).
