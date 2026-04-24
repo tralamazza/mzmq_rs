@@ -77,7 +77,7 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - run: cargo llvm-cov --no-report --features sync,async
+      - run: cargo llvm-cov --no-report --all-features
       - run: cargo llvm-cov report --html
       - run: bash scripts/coverage-table.sh >> $GITHUB_STEP_SUMMARY
 

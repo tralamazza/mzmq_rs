@@ -4,7 +4,7 @@ Before anything else, execute `brew list`.
 
 ## Dev environment tips
 - Run `cargo fmt --all` and `cargo clippy --all-targets --all-features` before committing.
-- Check code coverage with `cargo llvm-cov`.
+- Check code coverage with `cargo llvm-cov --all-features`.
 
 ## Testing instructions
 - Use TDD (red-green), one test at a time, blackbox testing.
