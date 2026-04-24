@@ -113,6 +113,9 @@ where
                     self.transport
                         .write_all(&ready[..n])
                         .map_err(|e| ConnError::IoError(e.kind() as usize))?;
+                    // Don't process peer's READY in the same poll — defer to
+                    // the next call so our READY is on the wire first
+                    // (NULL mechanism deadlock rule).
                     return Ok(false);
                 }
                 Err(ConnError::WrongState) => {}
@@ -126,6 +129,7 @@ where
             if self.rx_len < prev_rx_len {
                 return Ok(*self.conn.state() == State::Established);
             }
+            // Nothing consumed — the parser needs more bytes; fall through to read.
         }
 
         match self.transport.read(&mut self.rx_buf[self.rx_len..]) {
@@ -476,6 +480,7 @@ where
             if self.rx_len < prev_rx_len {
                 return Ok(*self.conn.state() == State::Established);
             }
+            // Nothing consumed — the parser needs more bytes; fall through to read.
         }
 
         match self.transport.read(&mut self.rx_buf[self.rx_len..]) {
