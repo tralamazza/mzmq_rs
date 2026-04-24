@@ -114,6 +114,8 @@ where
 {
     /// Create a new PLAIN-mechanism connection in the `Greeting` state.
     /// The `auth` value is called to validate credentials from each connecting peer.
+    /// On authentication failure `feed` returns `ConnError::PlainError(PlainError::AuthFailed)`;
+    /// call `write_error` and drop the connection.
     pub fn new_plain(auth: A) -> Self {
         Self {
             state: State::Greeting,
@@ -484,10 +486,6 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
 
         if let Some(frame) = maybe_frame {
             let body = frame.body;
-            if body.len() > 255 {
-                self.state = State::Failed;
-                return Err(ConnError::PlainError(PlainError::MalformedHello));
-            }
             match parse_hello_from(frame.is_command, body) {
                 Ok((username, password)) => {
                     if self.auth.check(username, password) {

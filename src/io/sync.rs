@@ -329,7 +329,7 @@ mod tests {
 
         let transport = MockTransport::new(peer);
         let mut driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
-        assert_eq!(driver.poll().unwrap(), false); // processes greeting
+        assert!(!driver.poll().unwrap()); // processes greeting
         assert!(driver.poll().is_err()); // PUSH READY → WrongSocketType → Failed
 
         // ERROR command frame written after partial(11)+rest(53)+ready(27)=91 bytes
@@ -669,7 +669,7 @@ mod radio_tests {
 
         let transport = MockTransport::new(peer);
         let mut driver = RadioDriver::<8, 32, 512, _>::new(transport).unwrap();
-        assert_eq!(driver.poll().unwrap(), false); // processes greeting
+        assert!(!driver.poll().unwrap()); // processes greeting
         assert!(driver.poll().is_err()); // SUB READY → WrongSocketType → Failed
 
         // ERROR command frame written after partial(11)+rest(53)+radio_ready(29)=93 bytes

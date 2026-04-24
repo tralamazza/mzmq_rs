@@ -38,8 +38,8 @@ pub fn encode_greeting(buf: &mut [u8; GREETING_LEN]) {
     // AS_SERVER and 31-byte filler remain 0x00
 }
 
-/// Writes the 64-byte ZMTP 3.1 PLAIN greeting for a PUB server socket into `buf`.
-/// Sets `as_server=1` (RFC 24 §2.1: the server must identify itself).
+/// Writes the 64-byte ZMTP 3.1 PLAIN greeting for a PLAIN server socket into `buf`.
+/// Sets `as_server=1` (RFC 27 §2.1: the server must identify itself).
 #[cfg(feature = "plain")]
 pub fn encode_plain_greeting(buf: &mut [u8; GREETING_LEN]) {
     *buf = [0u8; GREETING_LEN];

@@ -1,4 +1,10 @@
-// ZMTP PLAIN security mechanism — HELLO and WELCOME commands (RFC 24)
+//! ZMTP PLAIN security mechanism — HELLO and WELCOME commands (RFC 27).
+//!
+//! # Security warning
+//! PLAIN transmits usernames and passwords in clear text. Only use this
+//! mechanism over transports that are already confidential and authenticated
+//! (TLS, IPC, trusted LAN segments). Do **not** use PLAIN over untrusted
+//! networks without an outer encryption layer.
 
 /// Credential-check dispatch marker. Implemented by `()` (NULL mechanism, always rejects) and by
 /// any [`Authenticator`] when the `plain` feature is enabled. Required as a bound on
@@ -22,6 +28,8 @@ impl<A: Authenticator> AuthCheck for A {
 }
 
 /// Validates credentials presented by a connecting peer.
+///
+/// Implementations should use constant-time comparison to avoid timing side-channels.
 #[cfg(feature = "plain")]
 pub trait Authenticator {
     fn authenticate(&self, username: &[u8], password: &[u8]) -> bool;
@@ -39,6 +47,7 @@ pub enum PlainError {
     /// HELLO frame is structurally malformed.
     MalformedHello,
     /// Credentials were rejected by the authenticator.
+    /// The caller should call `write_error` and then drop the connection.
     AuthFailed,
     /// Peer sent an ERROR command.
     PeerError,
@@ -115,7 +124,6 @@ mod tests {
 
     fn hello_body(username: &[u8], password: &[u8]) -> heapless::Vec<u8, 64> {
         let name = b"HELLO";
-        let body_len = 1 + name.len() + 1 + username.len() + 1 + password.len();
         let mut v: heapless::Vec<u8, 64> = heapless::Vec::new();
         v.push(name.len() as u8).unwrap();
         v.extend_from_slice(name).unwrap();
@@ -123,7 +131,6 @@ mod tests {
         v.extend_from_slice(username).unwrap();
         v.push(password.len() as u8).unwrap();
         v.extend_from_slice(password).unwrap();
-        let _ = body_len; // used implicitly via Vec length
         v
     }
 

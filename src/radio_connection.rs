@@ -115,6 +115,9 @@ where
     A: crate::plain::Authenticator,
 {
     /// Create a new PLAIN-mechanism connection in the `Greeting` state.
+    /// The `auth` value is called to validate credentials from each connecting peer.
+    /// On authentication failure `feed` returns `ConnError::PlainError(PlainError::AuthFailed)`;
+    /// call `write_error` and drop the connection.
     pub fn new_plain(auth: A) -> Self {
         Self {
             state: State::Greeting,
@@ -468,10 +471,6 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
 
         if let Some(frame) = maybe_frame {
             let body = frame.body;
-            if body.len() > 255 {
-                self.state = State::Failed;
-                return Err(ConnError::PlainError(PlainError::MalformedHello));
-            }
             match parse_hello_from(frame.is_command, body) {
                 Ok((username, password)) => {
                     if self.auth.check(username, password) {
@@ -888,5 +887,237 @@ mod tests {
         let mut expected = [0u8; GREETING_LEN];
         encode_greeting(&mut expected);
         assert_eq!(combined, expected);
+    }
+
+    // ---------------------------------------------------------------------------
+    // PLAIN mechanism tests
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "plain")]
+    mod plain_tests {
+        use super::*;
+        use crate::greeting::{GREETING_LEN, encode_plain_greeting};
+        use crate::plain::{Authenticator, WELCOME_LEN};
+
+        struct AcceptAll;
+        impl Authenticator for AcceptAll {
+            fn authenticate(&self, _username: &[u8], _password: &[u8]) -> bool {
+                true
+            }
+        }
+
+        struct RejectAll;
+        impl Authenticator for RejectAll {
+            fn authenticate(&self, _username: &[u8], _password: &[u8]) -> bool {
+                false
+            }
+        }
+
+        struct RequireCredentials {
+            user: &'static [u8],
+            pass: &'static [u8],
+        }
+        impl Authenticator for RequireCredentials {
+            fn authenticate(&self, username: &[u8], password: &[u8]) -> bool {
+                username == self.user && password == self.pass
+            }
+        }
+
+        fn plain_dish_greeting() -> [u8; GREETING_LEN] {
+            let mut g = [0u8; GREETING_LEN];
+            g[0] = 0xFF;
+            g[9] = 0x7F;
+            g[10] = 0x03;
+            g[11] = 0x01;
+            g[12] = b'P';
+            g[13] = b'L';
+            g[14] = b'A';
+            g[15] = b'I';
+            g[16] = b'N';
+            // as_server = 0 (client role)
+            g
+        }
+
+        fn hello_frame(username: &[u8], password: &[u8]) -> heapless::Vec<u8, 64> {
+            let body_len: u8 = (1 + 5 + 1 + username.len() + 1 + password.len()) as u8;
+            let mut f: heapless::Vec<u8, 64> = heapless::Vec::new();
+            f.push(0x04).unwrap(); // COMMAND flag
+            f.push(body_len).unwrap();
+            f.push(5).unwrap(); // name_len
+            f.extend_from_slice(b"HELLO").unwrap();
+            f.push(username.len() as u8).unwrap();
+            f.extend_from_slice(username).unwrap();
+            f.push(password.len() as u8).unwrap();
+            f.extend_from_slice(password).unwrap();
+            f
+        }
+
+        fn do_plain_handshake(conn: &mut RadioConnection<8, 32, 512, AcceptAll>) {
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_dish_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            let hello = hello_frame(b"user", b"pass");
+            conn.feed(hello.as_slice()).unwrap();
+            let mut welcome_buf = [0u8; 16];
+            conn.write_welcome(&mut welcome_buf).unwrap();
+            let mut ready_out = [0u8; 32];
+            conn.write_ready(&mut ready_out).unwrap();
+            conn.feed(&dish_ready()).unwrap();
+        }
+
+        // Test RP1: write_greeting_rest for PLAIN encodes "PLAIN" and as_server=1
+        #[test]
+        fn plain_write_greeting_rest_uses_plain_greeting() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            let mut combined = [0u8; GREETING_LEN];
+            let n1 = conn.write_greeting(&mut combined).unwrap();
+            let n2 = conn.write_greeting_rest(&mut combined[n1..]).unwrap();
+            assert_eq!(n1 + n2, GREETING_LEN);
+
+            let mut expected = [0u8; GREETING_LEN];
+            encode_plain_greeting(&mut expected);
+            assert_eq!(combined, expected);
+        }
+
+        // Test RP2: after greeting exchange, state advances to PlainHello (not Ready)
+        #[test]
+        fn plain_greeting_exchange_transitions_to_plain_hello() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_dish_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            assert_eq!(conn.state(), &State::PlainHello);
+        }
+
+        // Test RP3: feeding valid HELLO with correct credentials transitions to PlainReady
+        #[test]
+        fn plain_valid_hello_transitions_to_plain_ready() {
+            let mut conn: RadioConnection<8, 32, 512, RequireCredentials> =
+                RadioConnection::new_plain(RequireCredentials {
+                    user: b"alice",
+                    pass: b"secret",
+                });
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_dish_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+
+            let hello = hello_frame(b"alice", b"secret");
+            conn.feed(hello.as_slice()).unwrap();
+            assert_eq!(conn.state(), &State::PlainReady);
+        }
+
+        // Test RP4: wrong credentials transition to Failed and return AuthFailed
+        #[test]
+        fn plain_wrong_credentials_returns_auth_failed() {
+            let mut conn: RadioConnection<8, 32, 512, RejectAll> =
+                RadioConnection::new_plain(RejectAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_dish_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+
+            let hello = hello_frame(b"user", b"wrong");
+            let result = conn.feed(hello.as_slice());
+            assert_eq!(
+                result,
+                Err(ConnError::PlainError(crate::plain::PlainError::AuthFailed))
+            );
+            assert_eq!(conn.state(), &State::Failed);
+        }
+
+        // Test RP5: write_welcome in PlainReady state writes a 10-byte WELCOME frame
+        #[test]
+        fn plain_write_welcome_writes_correct_frame() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_dish_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            let hello = hello_frame(b"u", b"p");
+            conn.feed(hello.as_slice()).unwrap();
+
+            let mut welcome_buf = [0u8; 16];
+            let n = conn.write_welcome(&mut welcome_buf).unwrap();
+            assert_eq!(n, WELCOME_LEN);
+            assert_eq!(welcome_buf[0], 0x04);
+            assert_eq!(welcome_buf[1], 0x08);
+            assert_eq!(&welcome_buf[3..10], b"WELCOME");
+        }
+
+        // Test RP6: full PLAIN handshake reaches Established
+        #[test]
+        fn plain_full_handshake_reaches_established() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            do_plain_handshake(&mut conn);
+            assert_eq!(conn.state(), &State::Established);
+        }
+
+        // Test RP7: write_ready before write_welcome returns WrongState
+        #[test]
+        fn plain_write_ready_before_welcome_fails() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_dish_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            let hello = hello_frame(b"u", b"p");
+            conn.feed(hello.as_slice()).unwrap();
+            assert_eq!(conn.state(), &State::PlainReady);
+
+            let mut ready_out = [0u8; 32];
+            assert_eq!(conn.write_ready(&mut ready_out), Err(ConnError::WrongState));
+        }
+
+        // Test RP8: write_welcome in wrong state returns WrongState
+        #[test]
+        fn plain_write_welcome_in_wrong_state_fails() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            let mut out = [0u8; 16];
+            assert_eq!(conn.write_welcome(&mut out), Err(ConnError::WrongState));
+        }
+
+        // Test RP9: PLAIN connection rejects peer greeting with NULL mechanism
+        #[test]
+        fn plain_rejects_null_peer_greeting() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            let result = conn.feed(&dish_greeting()); // NULL greeting
+            assert!(result.is_err());
+        }
+
+        // Test RP10: after PLAIN handshake, publish works normally
+        #[test]
+        fn plain_publish_after_handshake_works() {
+            let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
+                RadioConnection::new_plain(AcceptAll);
+            do_plain_handshake(&mut conn);
+
+            let join_frame = {
+                let name = b"JOIN";
+                let body_len = 1 + name.len();
+                let mut f: heapless::Vec<u8, 32> = heapless::Vec::new();
+                f.push(0x04).unwrap();
+                f.push(body_len as u8).unwrap();
+                f.push(name.len() as u8).unwrap();
+                f.extend_from_slice(name).unwrap();
+                f
+            };
+            conn.feed(join_frame.as_slice()).unwrap();
+
+            let mut buf = [0u8; 256];
+            let n = conn.publish(b"", b"hello", &mut buf).unwrap();
+            assert!(n > 0);
+        }
     }
 }
