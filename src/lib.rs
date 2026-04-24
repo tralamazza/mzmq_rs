@@ -5,6 +5,7 @@ pub mod frame;
 pub mod greeting;
 pub mod group_table;
 pub mod null;
+pub mod plain;
 pub mod radio_connection;
 pub mod sub_table;
 

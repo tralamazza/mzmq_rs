@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 .venv/
 .uv-cache/
+
+.claude/

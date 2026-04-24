@@ -11,6 +11,7 @@ default = ["sync"]
 std = []
 sync = ["dep:embedded-io"]
 async = ["dep:embedded-io-async"]
+plain = []
 python-tests = []
 
 [dependencies]

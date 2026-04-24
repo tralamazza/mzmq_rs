@@ -173,8 +173,27 @@ mod tests {
     use crate::test_helpers::{
         pub_ready, sub_greeting, sub_ready, sub_subscribe, sync_mock::MockTransport,
     };
+    use embedded_io::{ErrorKind, Read, Write};
 
     extern crate alloc;
+
+    struct ReadErrorTransport;
+    impl embedded_io::ErrorType for ReadErrorTransport {
+        type Error = ErrorKind;
+    }
+    impl Read for ReadErrorTransport {
+        fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
+            Err(ErrorKind::BrokenPipe)
+        }
+    }
+    impl Write for ReadErrorTransport {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 
     fn make_established(prefix: Option<&[u8]>) -> Driver<8, 32, 512, MockTransport> {
         let mut peer = alloc::vec::Vec::new();
@@ -257,6 +276,66 @@ mod tests {
         let mut driver = make_established(Some(b"foo"));
         assert_eq!(driver.publish(b"bar", b"payload").unwrap(), 0);
         assert!(driver.publish(b"fooX", b"payload").unwrap() > 0);
+    }
+
+    #[test]
+    fn driver_poll_eof_returns_error() {
+        let transport = MockTransport::new(alloc::vec::Vec::new());
+        let mut driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
+        assert!(matches!(driver.poll(), Err(ConnError::IoError(0))));
+    }
+
+    #[test]
+    fn driver_poll_transport_read_error_propagates() {
+        let mut driver = Driver::<8, 32, 512, _>::new(ReadErrorTransport).unwrap();
+        assert!(matches!(driver.poll(), Err(ConnError::IoError(_))));
+    }
+
+    #[test]
+    fn driver_ping_triggers_pong_response() {
+        // PING: flags=0x04, body=9, name-size=4, "PING", ttl=0x00,0x00, ctx=b"hi"
+        let ping = [
+            0x04u8, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
+        ];
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&sub_greeting());
+        peer.extend_from_slice(&sub_ready());
+        peer.extend_from_slice(&ping);
+
+        let transport = MockTransport::new(peer);
+        let mut driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
+        while !driver.poll().unwrap() {}
+
+        // partial(11) + rest(53) + pub_ready(27) = 91 bytes, then PONG(9)
+        let written = driver.transport.written();
+        assert!(written.len() >= 100);
+        let pong = &written[91..100];
+        assert_eq!(pong[0], 0x04); // COMMAND
+        assert_eq!(pong[1], 7); // body len = 1+4+2
+        assert_eq!(&pong[2..7], &[0x04, b'P', b'O', b'N', b'G']);
+        assert_eq!(&pong[7..9], b"hi");
+    }
+
+    #[test]
+    fn driver_feed_error_writes_error_frame_and_returns_err() {
+        // PUSH READY: wrong socket type for a PUB connection
+        let push_ready = [
+            0x04u8, 0x1A, 0x05, b'R', b'E', b'A', b'D', b'Y', 0x0B, b'S', b'o', b'c', b'k', b'e',
+            b't', b'-', b'T', b'y', b'p', b'e', 0x00, 0x00, 0x00, 0x04, b'P', b'U', b'S', b'H',
+        ];
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&sub_greeting());
+        peer.extend_from_slice(&push_ready);
+
+        let transport = MockTransport::new(peer);
+        let mut driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
+        assert!(!driver.poll().unwrap()); // processes greeting
+        assert!(driver.poll().is_err()); // PUSH READY → WrongSocketType → Failed
+
+        // ERROR command frame written after partial(11)+rest(53)+ready(27)=91 bytes
+        let written = driver.transport.written();
+        assert!(written.len() > 91);
+        assert_eq!(written[91], 0x04); // COMMAND flag
     }
 }
 
@@ -435,8 +514,27 @@ mod radio_tests {
     use crate::test_helpers::{
         dish_greeting, dish_join, dish_ready, radio_ready, sync_mock::MockTransport,
     };
+    use embedded_io::{ErrorKind, Read, Write};
 
     extern crate alloc;
+
+    struct ReadErrorTransport;
+    impl embedded_io::ErrorType for ReadErrorTransport {
+        type Error = ErrorKind;
+    }
+    impl Read for ReadErrorTransport {
+        fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
+            Err(ErrorKind::BrokenPipe)
+        }
+    }
+    impl Write for ReadErrorTransport {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 
     fn make_established(group: Option<&[u8]>) -> RadioDriver<8, 32, 512, MockTransport> {
         let mut peer = alloc::vec::Vec::new();
@@ -522,5 +620,61 @@ mod radio_tests {
         let mut driver = make_established(Some(b"foo"));
         assert_eq!(driver.publish(b"foobar", b"payload").unwrap(), 0);
         assert!(driver.publish(b"foo", b"payload").unwrap() > 0);
+    }
+
+    #[test]
+    fn radio_driver_poll_eof_returns_error() {
+        let transport = MockTransport::new(alloc::vec::Vec::new());
+        let mut driver = RadioDriver::<8, 32, 512, _>::new(transport).unwrap();
+        assert!(driver.poll().is_err());
+    }
+
+    #[test]
+    fn radio_driver_poll_transport_read_error_propagates() {
+        let mut driver = RadioDriver::<8, 32, 512, _>::new(ReadErrorTransport).unwrap();
+        assert!(driver.poll().is_err());
+    }
+
+    #[test]
+    fn radio_driver_ping_triggers_pong_response() {
+        // PING: flags=0x04, body=9, name-size=4, "PING", ttl=0x00,0x00, ctx=b"hi"
+        let ping = [
+            0x04u8, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
+        ];
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&dish_greeting());
+        peer.extend_from_slice(&dish_ready());
+        peer.extend_from_slice(&ping);
+
+        let transport = MockTransport::new(peer);
+        let mut driver = RadioDriver::<8, 32, 512, _>::new(transport).unwrap();
+        while !driver.poll().unwrap() {}
+
+        // partial(11) + rest(53) + radio_ready(29) = 93 bytes, then PONG(9)
+        let written = driver.transport.written();
+        assert!(written.len() >= 102);
+        let pong = &written[93..102];
+        assert_eq!(pong[0], 0x04); // COMMAND
+        assert_eq!(pong[1], 7); // body len = 1+4+2
+        assert_eq!(&pong[2..7], &[0x04, b'P', b'O', b'N', b'G']);
+        assert_eq!(&pong[7..9], b"hi");
+    }
+
+    #[test]
+    fn radio_driver_feed_error_writes_error_frame_and_returns_err() {
+        // SUB READY: wrong socket type for a RADIO connection (expects DISH)
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&dish_greeting());
+        peer.extend_from_slice(&crate::test_helpers::sub_ready());
+
+        let transport = MockTransport::new(peer);
+        let mut driver = RadioDriver::<8, 32, 512, _>::new(transport).unwrap();
+        assert!(!driver.poll().unwrap()); // processes greeting
+        assert!(driver.poll().is_err()); // SUB READY → WrongSocketType → Failed
+
+        // ERROR command frame written after partial(11)+rest(53)+radio_ready(29)=93 bytes
+        let written = driver.transport.written();
+        assert!(written.len() > 93);
+        assert_eq!(written[93], 0x04); // COMMAND flag
     }
 }

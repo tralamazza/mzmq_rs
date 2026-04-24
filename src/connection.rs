@@ -4,7 +4,12 @@ use crate::greeting::{
     GREETING_LEN, GREETING_PARTIAL_LEN, GreetingError, encode_greeting, parse_greeting,
     parse_partial_greeting,
 };
+#[cfg(feature = "plain")]
+use crate::greeting::{encode_plain_greeting, parse_plain_greeting};
 use crate::null::{NullError, READY_LEN, encode_error, encode_ready, parse_ready_from};
+use crate::plain::AuthCheck;
+#[cfg(feature = "plain")]
+use crate::plain::{PlainError, WELCOME_LEN, encode_welcome, parse_hello_from};
 use crate::sub_table::SubTable;
 
 /// Headers returned by [`Connection::publish_headers`]:
@@ -16,8 +21,14 @@ pub type PublishHeaders = ([u8; MAX_FRAME_HEADER], usize, [u8; MAX_FRAME_HEADER]
 pub enum State {
     /// Waiting to send our greeting (or awaiting peer greeting bytes).
     Greeting,
-    /// Greeting exchanged; awaiting READY command from peer.
+    /// Greeting exchanged; awaiting READY command from peer (NULL mechanism).
     Ready,
+    /// PLAIN: greeting exchanged; awaiting HELLO command from peer.
+    #[cfg(feature = "plain")]
+    PlainHello,
+    /// PLAIN: HELLO validated; caller must send WELCOME then READY, then await peer READY.
+    #[cfg(feature = "plain")]
+    PlainReady,
     /// Handshake complete; can publish messages.
     Established,
     /// Unrecoverable error; connection must be dropped.
@@ -28,24 +39,40 @@ pub enum State {
 /// `SUB_CAP` = max simultaneous subscriptions per peer.
 /// `PREFIX_CAP` = max bytes per subscription prefix.
 /// `FRAME_CAP` = max body bytes buffered in the internal frame decoder.
-pub struct Connection<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize> {
+/// `A` = authenticator type; use the default `()` for the NULL mechanism,
+///       or supply an [`Authenticator`](crate::plain::Authenticator) and construct via
+///       [`Connection::new_plain`] for the PLAIN mechanism (requires the `plain` feature).
+pub struct Connection<
+    const SUB_CAP: usize,
+    const PREFIX_CAP: usize,
+    const FRAME_CAP: usize,
+    A: AuthCheck = (),
+> {
     state: State,
     our_greeting_partial_sent: bool,
     our_greeting_sent: bool,
     peer_greeting_received: bool,
     peer_version_minor: u8,
     our_ready_sent: bool,
+    #[cfg(feature = "plain")]
+    our_welcome_sent: bool,
+    #[cfg(feature = "plain")]
+    is_plain: bool,
     greeting_buf: [u8; 64],
     greeting_pos: usize,
     frame_decoder: FrameDecoder<FRAME_CAP>,
     sub_table: SubTable<SUB_CAP, PREFIX_CAP>,
     pending_pong: Option<([u8; 16], usize)>,
+    #[cfg(feature = "plain")]
+    auth: A,
+    #[cfg(not(feature = "plain"))]
+    _auth: core::marker::PhantomData<A>,
 }
 
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
-    Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP>
+    Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, ()>
 {
-    /// Create a new connection in the `Greeting` state.
+    /// Create a new NULL-mechanism connection in the `Greeting` state.
     pub fn new() -> Self {
         Self {
             state: State::Greeting,
@@ -54,14 +81,64 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
             peer_greeting_received: false,
             peer_version_minor: 0,
             our_ready_sent: false,
+            #[cfg(feature = "plain")]
+            our_welcome_sent: false,
+            #[cfg(feature = "plain")]
+            is_plain: false,
             greeting_buf: [0u8; 64],
             greeting_pos: 0,
             frame_decoder: FrameDecoder::new(),
             sub_table: SubTable::new(),
             pending_pong: None,
+            #[cfg(feature = "plain")]
+            auth: (),
+            #[cfg(not(feature = "plain"))]
+            _auth: core::marker::PhantomData,
         }
     }
+}
 
+impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize> Default
+    for Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, ()>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "plain")]
+impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A>
+    Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>
+where
+    A: crate::plain::Authenticator,
+{
+    /// Create a new PLAIN-mechanism connection in the `Greeting` state.
+    /// The `auth` value is called to validate credentials from each connecting peer.
+    /// On authentication failure `feed` returns `ConnError::PlainError(PlainError::AuthFailed)`;
+    /// call `write_error` and drop the connection.
+    pub fn new_plain(auth: A) -> Self {
+        Self {
+            state: State::Greeting,
+            our_greeting_partial_sent: false,
+            our_greeting_sent: false,
+            peer_greeting_received: false,
+            peer_version_minor: 0,
+            our_ready_sent: false,
+            our_welcome_sent: false,
+            is_plain: true,
+            greeting_buf: [0u8; 64],
+            greeting_pos: 0,
+            frame_decoder: FrameDecoder::new(),
+            sub_table: SubTable::new(),
+            pending_pong: None,
+            auth, // only compiled when plain feature is enabled
+        }
+    }
+}
+
+impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: AuthCheck>
+    Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>
+{
     /// Current handshake [`State`] of the connection.
     pub fn state(&self) -> &State {
         &self.state
@@ -71,19 +148,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     pub fn peer_version(&self) -> (u8, u8) {
         (3, self.peer_version_minor)
     }
-}
 
-impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize> Default
-    for Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP>
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
-    Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP>
-{
     /// Write the first 11 bytes of our greeting (signature + version major) into `out`.
     /// Call once after creating the connection.
     /// Returns Ok(GREETING_PARTIAL_LEN) or Err if not in Greeting state or buf too small.
@@ -103,7 +168,8 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
 
     /// Write the remaining 53 bytes of our greeting into `out`.
     /// Call after receiving the peer's partial greeting (11 bytes).
-    /// If the peer's full greeting is already received, transitions state to Ready.
+    /// If the peer's full greeting is already received, transitions state to Ready (NULL)
+    /// or PlainHello (PLAIN).
     pub fn write_greeting_rest(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
         if self.state != State::Greeting
             || !self.our_greeting_partial_sent
@@ -116,11 +182,29 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
             return Err(ConnError::BufferTooSmall);
         }
         let mut arr = [0u8; GREETING_LEN];
+        #[cfg(not(feature = "plain"))]
         encode_greeting(&mut arr);
+        #[cfg(feature = "plain")]
+        if self.is_plain {
+            encode_plain_greeting(&mut arr);
+        } else {
+            encode_greeting(&mut arr);
+        }
         out[..rest_len].copy_from_slice(&arr[GREETING_PARTIAL_LEN..]);
         self.our_greeting_sent = true;
         if self.peer_greeting_received {
-            self.state = State::Ready;
+            #[cfg(not(feature = "plain"))]
+            {
+                self.state = State::Ready;
+            }
+            #[cfg(feature = "plain")]
+            {
+                self.state = if self.is_plain {
+                    State::PlainHello
+                } else {
+                    State::Ready
+                };
+            }
         }
         Ok(rest_len)
     }
@@ -135,9 +219,15 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     }
 
     /// Write our READY command into `out`. Call after receiving a valid peer greeting.
+    /// For PLAIN, `write_welcome` must be called first.
     /// Returns Ok(READY_LEN) or Err.
     pub fn write_ready(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
-        if self.state != State::Ready {
+        #[cfg(not(feature = "plain"))]
+        let in_ready_state = self.state == State::Ready;
+        #[cfg(feature = "plain")]
+        let in_ready_state = self.state == State::Ready
+            || (self.state == State::PlainReady && self.our_welcome_sent);
+        if !in_ready_state {
             return Err(ConnError::WrongState);
         }
         if self.our_ready_sent {
@@ -158,6 +248,10 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
         match self.state {
             State::Greeting => self.feed_greeting(input),
             State::Ready => self.feed_ready(input),
+            #[cfg(feature = "plain")]
+            State::PlainHello => self.feed_plain_hello(input),
+            #[cfg(feature = "plain")]
+            State::PlainReady => self.feed_plain_ready(input),
             State::Established => self.feed_established(input),
             State::Failed => Err(ConnError::WrongState),
         }
@@ -179,12 +273,30 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
         }
 
         if self.greeting_pos == GREETING_LEN {
+            #[cfg(not(feature = "plain"))]
             let peer_greeting =
                 parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?;
+            #[cfg(feature = "plain")]
+            let peer_greeting = if self.is_plain {
+                parse_plain_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+            } else {
+                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+            };
             self.peer_version_minor = peer_greeting.version_minor;
             self.peer_greeting_received = true;
-            if self.our_greeting_sent && self.peer_greeting_received {
-                self.state = State::Ready;
+            if self.our_greeting_sent {
+                #[cfg(not(feature = "plain"))]
+                {
+                    self.state = State::Ready;
+                }
+                #[cfg(feature = "plain")]
+                {
+                    self.state = if self.is_plain {
+                        State::PlainHello
+                    } else {
+                        State::Ready
+                    };
+                }
             }
         }
 
@@ -352,6 +464,74 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
         out[7..7 + ctx_len].copy_from_slice(&ctx[..ctx_len]);
         Ok(Some(total))
     }
+
+    /// Encode a WELCOME command into `out`. Must be called after `feed` transitions to
+    /// `PlainReady`, and before `write_ready`.
+    #[cfg(feature = "plain")]
+    pub fn write_welcome(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
+        if self.state != State::PlainReady || self.our_welcome_sent {
+            return Err(ConnError::WrongState);
+        }
+        encode_welcome(out).map_err(ConnError::PlainError)?;
+        self.our_welcome_sent = true;
+        Ok(WELCOME_LEN)
+    }
+
+    #[cfg(feature = "plain")]
+    fn feed_plain_hello(&mut self, input: &[u8]) -> Result<usize, ConnError> {
+        let (consumed, maybe_frame) = self
+            .frame_decoder
+            .feed(input)
+            .map_err(ConnError::DecodeError)?;
+
+        if let Some(frame) = maybe_frame {
+            let body = frame.body;
+            match parse_hello_from(frame.is_command, body) {
+                Ok((username, password)) => {
+                    if self.auth.check(username, password) {
+                        self.state = State::PlainReady;
+                    } else {
+                        self.state = State::Failed;
+                        return Err(ConnError::PlainError(PlainError::AuthFailed));
+                    }
+                }
+                Err(e) => {
+                    self.state = State::Failed;
+                    return Err(ConnError::PlainError(e));
+                }
+            }
+        }
+        Ok(consumed)
+    }
+
+    #[cfg(feature = "plain")]
+    fn feed_plain_ready(&mut self, input: &[u8]) -> Result<usize, ConnError> {
+        if !self.our_welcome_sent || !self.our_ready_sent {
+            return Err(ConnError::WrongState);
+        }
+        let (consumed, maybe_frame) = self
+            .frame_decoder
+            .feed(input)
+            .map_err(ConnError::DecodeError)?;
+
+        if let Some(frame) = maybe_frame {
+            let body = frame.body;
+            if body.len() > 255 {
+                self.state = State::Failed;
+                return Err(ConnError::NullError(NullError::MalformedMetadata));
+            }
+            match parse_ready_from(frame.is_command, body) {
+                Ok(_) => {
+                    self.state = State::Established;
+                }
+                Err(e) => {
+                    self.state = State::Failed;
+                    return Err(ConnError::NullError(e));
+                }
+            }
+        }
+        Ok(consumed)
+    }
 }
 
 /// Errors returned by [`Connection`] operations.
@@ -367,6 +547,9 @@ pub enum ConnError {
     GreetingError(GreetingError),
     /// NULL mechanism error (READY/ERROR handshake).
     NullError(NullError),
+    /// PLAIN mechanism error (HELLO/WELCOME handshake).
+    #[cfg(feature = "plain")]
+    PlainError(PlainError),
     /// Outbound frame could not be encoded.
     FrameError(FrameError),
     /// Inbound frame could not be decoded.
@@ -861,5 +1044,232 @@ mod tests {
         let mut expected = [0u8; GREETING_LEN];
         encode_greeting(&mut expected);
         assert_eq!(combined, expected);
+    }
+
+    // ---------------------------------------------------------------------------
+    // PLAIN mechanism tests
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "plain")]
+    mod plain_tests {
+        use super::*;
+        use crate::greeting::{GREETING_LEN, encode_plain_greeting};
+        use crate::plain::{Authenticator, WELCOME_LEN};
+
+        struct AcceptAll;
+        impl Authenticator for AcceptAll {
+            fn authenticate(&self, _username: &[u8], _password: &[u8]) -> bool {
+                true
+            }
+        }
+
+        struct RejectAll;
+        impl Authenticator for RejectAll {
+            fn authenticate(&self, _username: &[u8], _password: &[u8]) -> bool {
+                false
+            }
+        }
+
+        struct RequireCredentials {
+            user: &'static [u8],
+            pass: &'static [u8],
+        }
+        impl Authenticator for RequireCredentials {
+            fn authenticate(&self, username: &[u8], password: &[u8]) -> bool {
+                username == self.user && password == self.pass
+            }
+        }
+
+        fn plain_client_greeting() -> [u8; GREETING_LEN] {
+            let mut g = [0u8; GREETING_LEN];
+            g[0] = 0xFF;
+            g[9] = 0x7F;
+            g[10] = 0x03;
+            g[11] = 0x01;
+            g[12] = b'P';
+            g[13] = b'L';
+            g[14] = b'A';
+            g[15] = b'I';
+            g[16] = b'N';
+            // as_server = 0 (client role)
+            g
+        }
+
+        fn hello_frame(username: &[u8], password: &[u8]) -> heapless::Vec<u8, 64> {
+            let body_len: u8 = (1 + 5 + 1 + username.len() + 1 + password.len()) as u8;
+            let mut f: heapless::Vec<u8, 64> = heapless::Vec::new();
+            f.push(0x04).unwrap(); // COMMAND flag
+            f.push(body_len).unwrap(); // body size
+            f.push(5).unwrap(); // name_len
+            f.extend_from_slice(b"HELLO").unwrap();
+            f.push(username.len() as u8).unwrap();
+            f.extend_from_slice(username).unwrap();
+            f.push(password.len() as u8).unwrap();
+            f.extend_from_slice(password).unwrap();
+            f
+        }
+
+        fn plain_sub_ready() -> [u8; 27] {
+            sub_ready()
+        }
+
+        fn do_plain_handshake(conn: &mut Connection<8, 32, 512, AcceptAll>) {
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_client_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            let hello = hello_frame(b"user", b"pass");
+            conn.feed(hello.as_slice()).unwrap();
+            let mut welcome_buf = [0u8; 16];
+            conn.write_welcome(&mut welcome_buf).unwrap();
+            let mut ready_out = [0u8; 32];
+            conn.write_ready(&mut ready_out).unwrap();
+            conn.feed(&plain_sub_ready()).unwrap();
+        }
+
+        // Test P1: write_greeting_rest for PLAIN encodes "PLAIN" and as_server=1
+        #[test]
+        fn plain_write_greeting_rest_uses_plain_greeting() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            let mut combined = [0u8; GREETING_LEN];
+            let n1 = conn.write_greeting(&mut combined).unwrap();
+            let n2 = conn.write_greeting_rest(&mut combined[n1..]).unwrap();
+            assert_eq!(n1 + n2, GREETING_LEN);
+
+            let mut expected = [0u8; GREETING_LEN];
+            encode_plain_greeting(&mut expected);
+            assert_eq!(combined, expected);
+        }
+
+        // Test P2: after greeting exchange, state advances to PlainHello (not Ready)
+        #[test]
+        fn plain_greeting_exchange_transitions_to_plain_hello() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_client_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            assert_eq!(conn.state(), &State::PlainHello);
+        }
+
+        // Test P3: feeding valid HELLO with correct credentials transitions to PlainReady
+        #[test]
+        fn plain_valid_hello_transitions_to_plain_ready() {
+            let mut conn: Connection<8, 32, 512, RequireCredentials> =
+                Connection::new_plain(RequireCredentials {
+                    user: b"alice",
+                    pass: b"secret",
+                });
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_client_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+
+            let hello = hello_frame(b"alice", b"secret");
+            conn.feed(hello.as_slice()).unwrap();
+            assert_eq!(conn.state(), &State::PlainReady);
+        }
+
+        // Test P4: wrong credentials transition to Failed and return AuthFailed
+        #[test]
+        fn plain_wrong_credentials_returns_auth_failed() {
+            let mut conn: Connection<8, 32, 512, RejectAll> = Connection::new_plain(RejectAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_client_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+
+            let hello = hello_frame(b"user", b"wrong");
+            let result = conn.feed(hello.as_slice());
+            assert_eq!(
+                result,
+                Err(ConnError::PlainError(crate::plain::PlainError::AuthFailed))
+            );
+            assert_eq!(conn.state(), &State::Failed);
+        }
+
+        // Test P5: write_welcome in PlainReady state writes a 10-byte WELCOME frame
+        #[test]
+        fn plain_write_welcome_writes_correct_frame() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_client_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            let hello = hello_frame(b"u", b"p");
+            conn.feed(hello.as_slice()).unwrap();
+
+            let mut welcome_buf = [0u8; 16];
+            let n = conn.write_welcome(&mut welcome_buf).unwrap();
+            assert_eq!(n, WELCOME_LEN);
+            assert_eq!(welcome_buf[0], 0x04);
+            assert_eq!(welcome_buf[1], 0x08);
+            assert_eq!(&welcome_buf[3..10], b"WELCOME");
+        }
+
+        // Test P6: full PLAIN handshake reaches Established
+        #[test]
+        fn plain_full_handshake_reaches_established() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            do_plain_handshake(&mut conn);
+            assert_eq!(conn.state(), &State::Established);
+        }
+
+        // Test P7: write_ready before write_welcome returns WrongState
+        #[test]
+        fn plain_write_ready_before_welcome_fails() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            conn.feed(&plain_client_greeting()).unwrap();
+            conn.write_greeting_rest(&mut out).unwrap();
+            let hello = hello_frame(b"u", b"p");
+            conn.feed(hello.as_slice()).unwrap();
+            assert_eq!(conn.state(), &State::PlainReady);
+
+            let mut ready_out = [0u8; 32];
+            assert_eq!(conn.write_ready(&mut ready_out), Err(ConnError::WrongState));
+        }
+
+        // Test P8: write_welcome in wrong state returns WrongState
+        #[test]
+        fn plain_write_welcome_in_wrong_state_fails() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            let mut out = [0u8; 16];
+            assert_eq!(conn.write_welcome(&mut out), Err(ConnError::WrongState));
+        }
+
+        // Test P9: PLAIN connection rejects peer greeting with NULL mechanism
+        #[test]
+        fn plain_rejects_null_peer_greeting() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            let mut out = [0u8; 64];
+            conn.write_greeting(&mut out).unwrap();
+            let result = conn.feed(&sub_greeting()); // NULL greeting
+            assert!(result.is_err());
+        }
+
+        // Test P10: after PLAIN handshake, publish works normally
+        #[test]
+        fn plain_publish_after_handshake_works() {
+            let mut conn: Connection<8, 32, 512, AcceptAll> = Connection::new_plain(AcceptAll);
+            do_plain_handshake(&mut conn);
+
+            let sub_frame = {
+                let name = b"SUBSCRIBE";
+                let body_len = 1 + name.len();
+                let mut f: heapless::Vec<u8, 32> = heapless::Vec::new();
+                f.push(0x04).unwrap();
+                f.push(body_len as u8).unwrap();
+                f.push(name.len() as u8).unwrap();
+                f.extend_from_slice(name).unwrap();
+                f
+            };
+            conn.feed(sub_frame.as_slice()).unwrap();
+
+            let mut buf = [0u8; 256];
+            let n = conn.publish(b"", b"hello", &mut buf).unwrap();
+            assert!(n > 0);
+        }
     }
 }
