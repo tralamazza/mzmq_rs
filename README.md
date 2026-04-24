@@ -70,6 +70,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 See [`examples/pub_hello.rs`](examples/pub_hello.rs) for a runnable version with timeouts and error handling.
 
+### PLAIN security (optional)
+
+Enable the `plain` feature and use `Driver::new_plain(transport, authenticator)` instead of
+`Driver::new(transport)` to authenticate peers with a username/password pair. The authenticator
+must implement `mzmq::plain::Authenticator`. PLAIN transmits credentials in clear text — only
+use over trusted or encrypted transports.
+
+```rust
+use mzmq::io::sync::Driver;
+use mzmq::plain::Authenticator;
+
+struct MyAuth { user: &'static [u8], pass: &'static [u8] }
+impl Authenticator for MyAuth {
+    fn authenticate(&self, username: &[u8], password: &[u8]) -> bool {
+        username == self.user && password == self.pass
+    }
+}
+
+let auth = MyAuth { user: b"admin", pass: b"secret" };
+let mut driver = Driver::<8, 32, 1024, _, _>::new_plain(transport, auth)?;
+```
+
 ## Features
 
 | Feature | Default | Description |
@@ -77,6 +99,7 @@ See [`examples/pub_hello.rs`](examples/pub_hello.rs) for a runnable version with
 | `sync` | yes | Blocking driver over `embedded-io` |
 | `async` | no | Async driver over `embedded-io-async` |
 | `std` | no | Opt out of `no_std`; required on hosted targets |
+| `plain` | no | ZMTP PLAIN security mechanism (RFC 27) — server role |
 | `python-tests` | no | Integration tests against a real `pyzmq` process |
 
 ## no_std / embedded targets
@@ -91,7 +114,7 @@ All capacity bounds (`SUB_CAP`, `PREFIX_CAP`, `FRAME_CAP`, …) are const generi
 
 ## Protocol scope
 
-- **Transport**: ZMTP 3.1 (RFC 37), NULL security mechanism only
+- **Transport**: ZMTP 3.1 (RFC 37), NULL and PLAIN (RFC 27, optional feature) security mechanisms
 - **Roles**: PUB (to SUB/XSUB peers) and RADIO (to DISH peers)
 - **Framing**: short frames (≤ 255 bytes) and long frames (> 255 bytes)
 - **Subscriptions**: SUBSCRIBE/CANCEL (3.1) and legacy 0x01/0x00 prefix (3.0)
