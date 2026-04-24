@@ -17,7 +17,7 @@ use crate::sub_table::SubTable;
 pub type PublishHeaders = ([u8; MAX_FRAME_HEADER], usize, [u8; MAX_FRAME_HEADER], usize);
 
 /// State of the connection.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum State {
     /// Waiting to send our greeting (or awaiting peer greeting bytes).
     Greeting,

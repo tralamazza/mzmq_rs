@@ -94,6 +94,42 @@ pub(crate) fn dish_join(group: &[u8]) -> alloc::vec::Vec<u8> {
     f
 }
 
+/// 64-byte ZMTP 3.1 PLAIN greeting as a SUB peer (client role, `as_server=0`) would send it.
+#[cfg(feature = "plain")]
+pub(crate) fn plain_sub_greeting() -> [u8; 64] {
+    let mut g = [0u8; 64];
+    g[0] = 0xFF;
+    g[9] = 0x7F;
+    g[10] = 0x03;
+    g[11] = 0x01;
+    g[12] = b'P';
+    g[13] = b'L';
+    g[14] = b'A';
+    g[15] = b'I';
+    g[16] = b'N';
+    // bytes 17–31: mechanism padding = 0x00
+    // byte 32: as_server = 0x00 (client role)
+    g
+}
+
+/// Build a ZMTP 3.1 PLAIN HELLO command frame with the given credentials.
+#[cfg(feature = "plain")]
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn plain_hello(username: &[u8], password: &[u8]) -> alloc::vec::Vec<u8> {
+    // name_len(1) + "HELLO"(5) + ulen(1) + username + plen(1) + password
+    let body_len = 1 + 5 + 1 + username.len() + 1 + password.len();
+    let mut f = alloc::vec::Vec::new();
+    f.push(0x04u8);
+    f.push(body_len as u8);
+    f.push(5u8);
+    f.extend_from_slice(b"HELLO");
+    f.push(username.len() as u8);
+    f.extend_from_slice(username);
+    f.push(password.len() as u8);
+    f.extend_from_slice(password);
+    f
+}
+
 // ---------------------------------------------------------------------------
 // Mock transports (sync / async) shared by IO driver tests
 // ---------------------------------------------------------------------------

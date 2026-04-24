@@ -5,6 +5,9 @@
 //! `publish` method.
 
 use crate::connection::{ConnError, Connection, State};
+use crate::plain::AuthCheck;
+#[cfg(feature = "plain")]
+use crate::plain::WELCOME_LEN;
 use embedded_io::{Error, Read, Write};
 
 /// Blocking driver for a ZMTP 3.1 PUB [`Connection`].
@@ -18,19 +21,25 @@ use embedded_io::{Error, Read, Write};
 /// Internal buffers (not configurable):
 /// - `rx_buf` is 512 bytes — holds handshake bytes and a single inbound
 ///   SUBSCRIBE/CANCEL frame, which fit comfortably at that size.
-pub struct Driver<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T> {
-    conn: Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP>,
+pub struct Driver<
+    const SUB_CAP: usize,
+    const PREFIX_CAP: usize,
+    const FRAME_CAP: usize,
+    T,
+    A: AuthCheck = (),
+> {
+    conn: Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>,
     transport: T,
     rx_buf: [u8; 512],
     rx_len: usize,
 }
 
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T>
-    Driver<SUB_CAP, PREFIX_CAP, FRAME_CAP, T>
+    Driver<SUB_CAP, PREFIX_CAP, FRAME_CAP, T, ()>
 where
     T: Read + Write,
 {
-    /// Create a new driver. Sends our greeting immediately.
+    /// Create a new NULL-mechanism driver. Sends our greeting immediately.
     ///
     /// # Errors
     /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
@@ -51,7 +60,46 @@ where
             rx_len: 0,
         })
     }
+}
 
+#[cfg(feature = "plain")]
+impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T, A>
+    Driver<SUB_CAP, PREFIX_CAP, FRAME_CAP, T, A>
+where
+    T: Read + Write,
+    A: crate::plain::Authenticator,
+{
+    /// Create a new PLAIN-mechanism driver (server role). Sends our greeting immediately.
+    ///
+    /// `auth` must implement [`crate::plain::Authenticator`]. For the NULL mechanism use
+    /// [`Driver::new`] instead — `()` satisfies [`AuthCheck`] but not [`crate::plain::Authenticator`].
+    ///
+    /// # Errors
+    /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
+    /// Returns `ConnError::IoError` if the transport write fails.
+    pub fn new_plain(mut transport: T, auth: A) -> Result<Self, ConnError> {
+        let mut conn = Connection::new_plain(auth);
+
+        let mut greeting = [0u8; 64];
+        let n = conn.write_greeting(&mut greeting)?;
+        transport
+            .write_all(&greeting[..n])
+            .map_err(|e| ConnError::IoError(e.kind() as usize))?;
+
+        Ok(Self {
+            conn,
+            transport,
+            rx_buf: [0u8; 512],
+            rx_len: 0,
+        })
+    }
+}
+
+impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T, A: AuthCheck>
+    Driver<SUB_CAP, PREFIX_CAP, FRAME_CAP, T, A>
+where
+    T: Read + Write,
+{
     /// Drive the connection one step. Blocks on `transport.read` when there is
     /// no buffered data left to process. Returns `Ok(true)` when the connection
     /// is `Established`.
@@ -73,16 +121,18 @@ where
                     // (NULL mechanism deadlock rule).
                     return Ok(false);
                 }
-                Err(ConnError::WrongState) => {
-                    // Already sent.
-                }
+                Err(ConnError::WrongState) => {}
                 Err(e) => return Err(e),
             }
         }
 
         if self.rx_len > 0 {
+            let prev_rx_len = self.rx_len;
             self.drain_buffer()?;
-            return Ok(*self.conn.state() == State::Established);
+            if self.rx_len < prev_rx_len {
+                return Ok(*self.conn.state() == State::Established);
+            }
+            // Nothing consumed — the parser needs more bytes; fall through to read.
         }
 
         match self.transport.read(&mut self.rx_buf[self.rx_len..]) {
@@ -97,45 +147,44 @@ where
     }
 
     fn drain_buffer(&mut self) -> Result<(), ConnError> {
+        let io_err =
+            |e: <T as embedded_io::ErrorType>::Error| ConnError::IoError(e.kind() as usize);
         let mut total_consumed = 0;
         while total_consumed < self.rx_len {
-            let was_ready_before = *self.conn.state() == State::Ready;
+            let prev_state = *self.conn.state();
             match self.conn.feed(&self.rx_buf[total_consumed..self.rx_len]) {
                 Ok(consumed) => {
                     total_consumed += consumed;
 
-                    // Send greeting rest if we received peer's partial but haven't sent ours
                     if self.conn.greeting_rest_pending() {
                         let mut rest = [0u8; 64];
-                        match self.conn.write_greeting_rest(&mut rest) {
-                            Ok(n) => {
-                                self.transport
-                                    .write_all(&rest[..n])
-                                    .map_err(|e| ConnError::IoError(e.kind() as usize))?;
-                            }
-                            Err(e) => return Err(e),
-                        }
+                        let n = self.conn.write_greeting_rest(&mut rest)?;
+                        self.transport.write_all(&rest[..n]).map_err(io_err)?;
                     }
 
-                    if *self.conn.state() == State::Ready && !was_ready_before {
-                        let mut ready = [0u8; 32];
-                        match self.conn.write_ready(&mut ready) {
-                            Ok(n) => {
-                                self.transport
-                                    .write_all(&ready[..n])
-                                    .map_err(|e| ConnError::IoError(e.kind() as usize))?;
-                                break;
-                            }
-                            Err(e) => return Err(e),
+                    match (prev_state, self.conn.state()) {
+                        (State::Greeting, State::Ready) => {
+                            let mut ready = [0u8; 32];
+                            let n = self.conn.write_ready(&mut ready)?;
+                            self.transport.write_all(&ready[..n]).map_err(io_err)?;
+                            break;
                         }
+                        #[cfg(feature = "plain")]
+                        (State::PlainHello, State::PlainReady) => {
+                            let mut welcome = [0u8; WELCOME_LEN];
+                            let n = self.conn.write_welcome(&mut welcome)?;
+                            self.transport.write_all(&welcome[..n]).map_err(io_err)?;
+                            let mut ready = [0u8; 32];
+                            let n = self.conn.write_ready(&mut ready)?;
+                            self.transport.write_all(&ready[..n]).map_err(io_err)?;
+                            break;
+                        }
+                        _ => {}
                     }
 
-                    // Send PONG if PING was received
                     let mut pong_buf = [0u8; 23];
                     if let Some(n) = self.conn.write_pong(&mut pong_buf)? {
-                        self.transport
-                            .write_all(&pong_buf[..n])
-                            .map_err(|e| ConnError::IoError(e.kind() as usize))?;
+                        self.transport.write_all(&pong_buf[..n]).map_err(io_err)?;
                     }
 
                     if consumed == 0 {
@@ -429,8 +478,12 @@ where
         }
 
         if self.rx_len > 0 {
+            let prev_rx_len = self.rx_len;
             self.drain_buffer()?;
-            return Ok(*self.conn.state() == State::Established);
+            if self.rx_len < prev_rx_len {
+                return Ok(*self.conn.state() == State::Established);
+            }
+            // Nothing consumed — the parser needs more bytes; fall through to read.
         }
 
         match self.transport.read(&mut self.rx_buf[self.rx_len..]) {
@@ -704,5 +757,126 @@ mod radio_tests {
         let written = driver.transport.written();
         assert!(written.len() > 93);
         assert_eq!(written[93], 0x04); // COMMAND flag
+    }
+}
+
+#[cfg(all(test, feature = "plain"))]
+mod plain_driver_tests {
+    use super::*;
+    use crate::test_helpers::{
+        plain_hello, plain_sub_greeting, pub_ready, sub_ready, sub_subscribe,
+        sync_mock::MockTransport,
+    };
+
+    extern crate alloc;
+
+    struct AcceptAll;
+    impl crate::plain::Authenticator for AcceptAll {
+        fn authenticate(&self, _username: &[u8], _password: &[u8]) -> bool {
+            true
+        }
+    }
+
+    struct RejectAll;
+    impl crate::plain::Authenticator for RejectAll {
+        fn authenticate(&self, _username: &[u8], _password: &[u8]) -> bool {
+            false
+        }
+    }
+
+    fn make_plain_established(
+        prefix: Option<&[u8]>,
+    ) -> Driver<8, 32, 512, MockTransport, AcceptAll> {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&plain_sub_greeting());
+        peer.extend_from_slice(&plain_hello(b"user", b"pass"));
+        peer.extend_from_slice(&sub_ready());
+        if let Some(p) = prefix {
+            peer.extend_from_slice(&sub_subscribe(p));
+        }
+        let mut driver =
+            Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), AcceptAll).unwrap();
+        while !driver.poll().unwrap() {}
+        driver
+    }
+
+    #[test]
+    fn plain_driver_writes_partial_greeting_on_construction() {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&plain_sub_greeting());
+        peer.extend_from_slice(&plain_hello(b"u", b"p"));
+        peer.extend_from_slice(&sub_ready());
+
+        let driver =
+            Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), AcceptAll).unwrap();
+
+        let written = driver.transport.written();
+        assert_eq!(written.len(), 11);
+        assert_eq!(written[0], 0xFF);
+        assert_eq!(written[9], 0x7F);
+        assert_eq!(written[10], 0x03);
+    }
+
+    #[test]
+    fn plain_driver_completes_handshake() {
+        let driver = make_plain_established(None);
+        assert_eq!(*driver.conn.state(), State::Established);
+    }
+
+    #[test]
+    fn plain_driver_emits_welcome_then_ready() {
+        let driver = make_plain_established(None);
+        let written = driver.transport.written();
+        // partial(11) + rest(53) = 64 bytes (our PLAIN server greeting)
+        // welcome(10) at offset 64, pub_ready(27) at offset 74
+        assert!(written.len() >= 101);
+        // PLAIN server greeting: mechanism="PLAIN" at bytes 12–16, as_server=1 at byte 32
+        assert_eq!(&written[12..17], b"PLAIN");
+        assert_eq!(written[32], 0x01);
+        // WELCOME frame
+        assert_eq!(written[64], 0x04);
+        assert_eq!(written[65], 0x08);
+        assert_eq!(written[66], 0x07);
+        assert_eq!(&written[67..74], b"WELCOME");
+        // PUB READY frame
+        assert_eq!(&written[74..101], &pub_ready());
+    }
+
+    #[test]
+    fn plain_driver_publish_returns_zero_without_subscription() {
+        let mut driver = make_plain_established(None);
+        assert_eq!(driver.publish(b"topic", b"payload").unwrap(), 0);
+    }
+
+    #[test]
+    fn plain_driver_publish_writes_correct_wire_bytes() {
+        let mut driver = make_plain_established(Some(b"foo"));
+        let n = driver.publish(b"foo", b"bar").unwrap();
+        assert_eq!(n, 10); // 2+3+2+3
+        // greeting(64) + welcome(10) + pub_ready(27) = 101 bytes before publish
+        let pub_out = &driver.transport.written()[101..];
+        assert_eq!(
+            pub_out,
+            &[0x01, 0x03, b'f', b'o', b'o', 0x00, 0x03, b'b', b'a', b'r']
+        );
+    }
+
+    #[test]
+    fn plain_driver_rejects_bad_credentials() {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&plain_sub_greeting());
+        peer.extend_from_slice(&plain_hello(b"wrong", b"creds"));
+
+        let mut driver =
+            Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), RejectAll).unwrap();
+
+        let found_err = loop {
+            match driver.poll() {
+                Err(_) => break true,
+                Ok(true) => break false,
+                Ok(false) => {}
+            }
+        };
+        assert!(found_err, "Bad credentials should produce an error");
     }
 }
