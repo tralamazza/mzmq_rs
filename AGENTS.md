@@ -3,7 +3,7 @@ Before anything else, execute `brew list`.
 # Guidelines
 
 ## Dev environment tips
-- Run cargo fmt and clippy before committing.
+- Run `cargo fmt --all` and `cargo clippy --all-targets --all-features` before committing.
 - Check code coverage with `cargo llvm-cov`.
 
 ## Testing instructions

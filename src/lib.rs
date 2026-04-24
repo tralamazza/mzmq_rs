@@ -1,6 +1,5 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::must_use_candidate)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod connection;

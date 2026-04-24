@@ -19,6 +19,7 @@ pub struct GroupTable<const MAX_ENTRIES: usize, const MAX_GROUP_LEN: usize> {
 
 impl<const MAX_ENTRIES: usize, const MAX_GROUP_LEN: usize> GroupTable<MAX_ENTRIES, MAX_GROUP_LEN> {
     /// Create an empty group table.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -71,16 +72,19 @@ impl<const MAX_ENTRIES: usize, const MAX_GROUP_LEN: usize> GroupTable<MAX_ENTRIE
     }
 
     /// Returns `true` if `group` exactly matches a stored entry.
+    #[must_use]
     pub fn matches(&self, group: &[u8]) -> bool {
         self.entries.iter().any(|e| e.as_slice() == group)
     }
 
     /// Number of active group memberships.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// `true` when no groups are registered.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

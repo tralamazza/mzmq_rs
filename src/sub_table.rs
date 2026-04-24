@@ -19,6 +19,7 @@ pub struct SubTable<const MAX_ENTRIES: usize, const MAX_PREFIX_LEN: usize> {
 
 impl<const MAX_ENTRIES: usize, const MAX_PREFIX_LEN: usize> SubTable<MAX_ENTRIES, MAX_PREFIX_LEN> {
     /// Create an empty subscription table.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -79,16 +80,19 @@ impl<const MAX_ENTRIES: usize, const MAX_PREFIX_LEN: usize> SubTable<MAX_ENTRIES
     /// Returns `true` if at least one stored prefix is a prefix of `topic`.
     ///
     /// An empty stored prefix (`b""`) matches every topic.
+    #[must_use]
     pub fn matches(&self, topic: &[u8]) -> bool {
         self.entries.iter().any(|e| topic.starts_with(e.as_slice()))
     }
 
     /// Number of active subscriptions.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// `true` when no subscriptions are registered.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

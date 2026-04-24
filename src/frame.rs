@@ -121,6 +121,7 @@ pub struct FrameDecoder<const CAP: usize> {
 
 impl<const CAP: usize> FrameDecoder<CAP> {
     /// Create a new decoder in its initial state.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             state: State::NeedFlags,

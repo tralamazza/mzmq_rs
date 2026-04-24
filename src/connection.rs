@@ -74,6 +74,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
     Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, ()>
 {
     /// Create a new NULL-mechanism connection in the `Greeting` state.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             state: State::Greeting,
@@ -141,11 +142,13 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
     Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>
 {
     /// Current handshake [`State`] of the connection.
+    #[must_use]
     pub fn state(&self) -> &State {
         &self.state
     }
 
     /// Returns the peer's ZMTP version as (major, minor).
+    #[must_use]
     pub fn peer_version(&self) -> (u8, u8) {
         (3, self.peer_version_minor)
     }
@@ -220,6 +223,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
 
     /// Returns `true` if we have sent our partial greeting, received the peer's partial greeting,
     /// but have not yet sent the remaining 53 bytes.
+    #[must_use]
     pub fn greeting_rest_pending(&self) -> bool {
         self.state == State::Greeting
             && self.our_greeting_partial_sent
@@ -598,6 +602,7 @@ pub enum ConnError {
 
 impl ConnError {
     /// Returns `true` if the error originated from the transport.
+    #[must_use]
     pub fn is_io_error(&self) -> bool {
         matches!(self, ConnError::IoError(_))
     }
