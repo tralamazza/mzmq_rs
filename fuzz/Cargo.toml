@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-mzmq = { path = "..", default-features = false }
+mzmq = { path = "..", features = ["plain"] }
 
 [[bin]]
 name = "frame_decoder"
@@ -26,5 +26,41 @@ doc = false
 [[bin]]
 name = "connection_feed"
 path = "fuzz_targets/connection_feed.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "null_ready_parser"
+path = "fuzz_targets/null_ready_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "plain_hello_parser"
+path = "fuzz_targets/plain_hello_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sub_table"
+path = "fuzz_targets/sub_table.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "group_table"
+path = "fuzz_targets/group_table.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "radio_connection_feed"
+path = "fuzz_targets/radio_connection_feed.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "frame_encoder"
+path = "fuzz_targets/frame_encoder.rs"
 test = false
 doc = false

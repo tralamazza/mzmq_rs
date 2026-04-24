@@ -56,9 +56,15 @@ jobs:
 
       - run: cargo fuzz build --target x86_64-unknown-linux-gnu
 
-      - run: cargo fuzz run frame_decoder --target x86_64-unknown-linux-gnu -- -max_total_time=30
-      - run: cargo fuzz run greeting_parser --target x86_64-unknown-linux-gnu -- -max_total_time=30
-      - run: cargo fuzz run connection_feed --target x86_64-unknown-linux-gnu -- -max_total_time=30
+      - run: cargo fuzz run frame_decoder --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run greeting_parser --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run connection_feed --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run null_ready_parser --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run plain_hello_parser --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run sub_table --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run group_table --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run radio_connection_feed --target x86_64-unknown-linux-gnu -- -runs=2000000
+      - run: cargo fuzz run frame_encoder --target x86_64-unknown-linux-gnu -- -runs=2000000
 
       - uses: actions/upload-artifact@v7
         if: failure()
