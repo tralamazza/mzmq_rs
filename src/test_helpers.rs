@@ -116,6 +116,7 @@ pub(crate) fn plain_sub_greeting() -> [u8; 64] {
 #[cfg(feature = "plain")]
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn plain_hello(username: &[u8], password: &[u8]) -> alloc::vec::Vec<u8> {
+    // name_len(1) + "HELLO"(5) + ulen(1) + username + plen(1) + password
     let body_len = 1 + 5 + 1 + username.len() + 1 + password.len();
     let mut f = alloc::vec::Vec::new();
     f.push(0x04u8);

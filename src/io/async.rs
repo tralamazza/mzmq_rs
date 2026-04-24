@@ -72,6 +72,9 @@ where
 {
     /// Create a new PLAIN-mechanism driver (server role). Sends our greeting immediately.
     ///
+    /// `auth` must implement [`crate::plain::Authenticator`]. For the NULL mechanism use
+    /// [`Driver::new`] instead — `()` satisfies [`AuthCheck`] but not [`crate::plain::Authenticator`].
+    ///
     /// # Errors
     /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
     /// Returns `ConnError::IoError` if the transport write fails.
@@ -378,7 +381,7 @@ mod plain_driver_tests {
     }
 
     #[tokio::test]
-    async fn plain_driver_sends_partial_greeting_first() {
+    async fn plain_driver_writes_partial_greeting_on_construction() {
         let mut peer = alloc::vec::Vec::new();
         peer.extend_from_slice(&plain_sub_greeting());
         peer.extend_from_slice(&plain_hello(b"u", b"p"));
@@ -450,15 +453,12 @@ mod plain_driver_tests {
                 .await
                 .unwrap();
 
-        let found_err = {
-            let mut err = false;
-            for _ in 0..10 {
-                if driver.poll().await.is_err() {
-                    err = true;
-                    break;
-                }
+        let found_err = loop {
+            match driver.poll().await {
+                Err(_) => break true,
+                Ok(true) => break false,
+                Ok(false) => {}
             }
-            err
         };
         assert!(found_err, "Bad credentials should produce an error");
     }
