@@ -60,12 +60,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "test_crash"
-path = "fuzz_targets/test_crash.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "frame_encoder"
 path = "fuzz_targets/frame_encoder.rs"
 test = false
