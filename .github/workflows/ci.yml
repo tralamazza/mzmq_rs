@@ -45,6 +45,9 @@ jobs:
 
   fuzz:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v6
 
@@ -71,6 +74,48 @@ jobs:
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/
+
+      - name: File issue on fuzz crash
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const dir = 'fuzz/artifacts';
+            if (!fs.existsSync(dir)) { console.log('no artifacts dir'); return; }
+            const targets = fs.readdirSync(dir)
+              .filter(d => fs.statSync(path.join(dir, d)).isDirectory())
+              .map(d => ({ name: d, files: fs.readdirSync(path.join(dir, d)) }))
+              .filter(t => t.files.length > 0);
+            if (targets.length === 0) { console.log('no crash artifacts'); return; }
+            const names = targets.map(t => t.name);
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'fuzz',
+            });
+            const matched = issues.filter(i =>
+              names.some(n => i.title.includes(n))
+            );
+            if (matched.length > 0) {
+              const seen = new Set();
+              for (const issue of matched) {
+                if (seen.has(issue.number)) continue;
+                seen.add(issue.number);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `Another fuzz crash occurrence: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\nTargets: ${names.join(', ')}`,
+                });
+              }
+              return;
+            }
+            const title = `Fuzz crash: ${names.join(', ')}`;
+            const body = `## Fuzz Crash Detected\n\nCI run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n${targets.map(t => `**${t.name}**\n${t.files.map(f => '- `' + f + '`').join('\n')}`).join('\n\n')}\n\n---\n_Automated issue from CI fuzz workflow._`;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title, body, labels: ['fuzz', 'bug'],
+            });
 
   coverage:
     runs-on: ubuntu-latest
