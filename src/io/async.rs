@@ -168,7 +168,10 @@ where
                         (State::Greeting, State::Ready) => {
                             let mut ready = [0u8; 32];
                             let n = self.conn.write_ready(&mut ready)?;
-                            self.transport.write_all(&ready[..n]).await.map_err(io_err)?;
+                            self.transport
+                                .write_all(&ready[..n])
+                                .await
+                                .map_err(io_err)?;
                             break;
                         }
                         #[cfg(feature = "plain")]
@@ -181,7 +184,10 @@ where
                                 .map_err(io_err)?;
                             let mut ready = [0u8; 32];
                             let n = self.conn.write_ready(&mut ready)?;
-                            self.transport.write_all(&ready[..n]).await.map_err(io_err)?;
+                            self.transport
+                                .write_all(&ready[..n])
+                                .await
+                                .map_err(io_err)?;
                             break;
                         }
                         _ => {}
@@ -372,10 +378,9 @@ mod plain_driver_tests {
         if let Some(p) = prefix {
             peer.extend_from_slice(&sub_subscribe(p));
         }
-        let mut driver =
-            Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), AcceptAll)
-                .await
-                .unwrap();
+        let mut driver = Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), AcceptAll)
+            .await
+            .unwrap();
         while !driver.poll().await.unwrap() {}
         driver
     }
@@ -387,10 +392,9 @@ mod plain_driver_tests {
         peer.extend_from_slice(&plain_hello(b"u", b"p"));
         peer.extend_from_slice(&sub_ready());
 
-        let driver =
-            Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), AcceptAll)
-                .await
-                .unwrap();
+        let driver = Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), AcceptAll)
+            .await
+            .unwrap();
 
         let written = driver.transport.written();
         assert_eq!(written.len(), 11);
@@ -448,10 +452,9 @@ mod plain_driver_tests {
         peer.extend_from_slice(&plain_sub_greeting());
         peer.extend_from_slice(&plain_hello(b"wrong", b"creds"));
 
-        let mut driver =
-            Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), RejectAll)
-                .await
-                .unwrap();
+        let mut driver = Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), RejectAll)
+            .await
+            .unwrap();
 
         let found_err = loop {
             match driver.poll().await {
