@@ -23,6 +23,7 @@ pub(crate) fn sub_ready() -> [u8; 27] {
 }
 
 /// 27-byte READY command frame with `Socket-Type = PUB` (what this library emits).
+#[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn pub_ready() -> [u8; 27] {
     [
         0x04, 0x19, 0x05, 0x52, 0x45, 0x41, 0x44, 0x59, 0x0B, 0x53, 0x6F, 0x63, 0x6B, 0x65, 0x74,
@@ -53,6 +54,7 @@ pub(crate) fn dish_ready() -> [u8; 28] {
 }
 
 /// 29-byte READY command frame with `Socket-Type = RADIO` (what the RADIO library emits).
+#[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn radio_ready() -> [u8; 29] {
     [
         0x04, 0x1B, 0x05, 0x52, 0x45, 0x41, 0x44, 0x59, 0x0B, 0x53, 0x6F, 0x63, 0x6B, 0x65, 0x74,
@@ -67,6 +69,7 @@ pub(crate) fn radio_ready() -> [u8; 29] {
 extern crate alloc;
 
 /// Build a ZMTP 3.1 SUBSCRIBE command frame for the given prefix.
+#[cfg(any(feature = "sync", feature = "async"))]
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn sub_subscribe(prefix: &[u8]) -> alloc::vec::Vec<u8> {
     let name = b"SUBSCRIBE";
@@ -81,6 +84,7 @@ pub(crate) fn sub_subscribe(prefix: &[u8]) -> alloc::vec::Vec<u8> {
 }
 
 /// Build a ZMTP 3.1 JOIN command frame for the given group.
+#[cfg(any(feature = "sync", feature = "async"))]
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn dish_join(group: &[u8]) -> alloc::vec::Vec<u8> {
     let name = b"JOIN";

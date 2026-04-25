@@ -4,8 +4,8 @@
 //! `embedded_io::Read + Write`, drives the handshake, and exposes a
 //! `publish` method.
 
+use crate::auth::AuthCheck;
 use crate::connection::{ConnError, Connection, State};
-use crate::plain::AuthCheck;
 #[cfg(feature = "plain")]
 use crate::plain::WELCOME_LEN;
 use embedded_io::{Error, Read, Write};

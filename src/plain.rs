@@ -6,22 +6,8 @@
 //! (TLS, IPC, trusted LAN segments). Do **not** use PLAIN over untrusted
 //! networks without an outer encryption layer.
 
-/// Credential-check dispatch marker. Implemented by `()` (NULL mechanism, always rejects) and by
-/// any [`Authenticator`] when the `plain` feature is enabled. Required as a bound on
-/// [`Connection`](crate::connection::Connection) to allow the type parameter `A` to be used
-/// uniformly across both mechanisms without boxing.
-pub trait AuthCheck {
-    fn check(&self, username: &[u8], password: &[u8]) -> bool;
-}
-
-impl AuthCheck for () {
-    fn check(&self, _username: &[u8], _password: &[u8]) -> bool {
-        false
-    }
-}
-
 #[cfg(feature = "plain")]
-impl<A: Authenticator> AuthCheck for A {
+impl<A: Authenticator> crate::auth::AuthCheck for A {
     fn check(&self, username: &[u8], password: &[u8]) -> bool {
         self.authenticate(username, password)
     }
