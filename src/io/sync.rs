@@ -451,9 +451,9 @@ mod tests {
 // RADIO driver (parallel to the PUB Driver above)
 // ---------------------------------------------------------------------------
 
-/// Blocking driver for a ZMTP 3.1 RADIO [`RadioConnection`].
+/// Blocking driver for a ZMTP 3.1 RADIO [`crate::radio_connection::RadioConnection`].
 ///
-/// Generic parameters mirror [`RadioConnection`]:
+/// Generic parameters mirror [`crate::radio_connection::RadioConnection`]:
 /// - `GROUP_CAP`    — maximum simultaneous peer group memberships
 /// - `GROUP_LEN_CAP` — maximum bytes per group name
 /// - `FRAME_CAP`  — frame-decoder body buffer size

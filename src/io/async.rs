@@ -549,9 +549,9 @@ mod plain_driver_tests {
 // Async RADIO driver (parallel to the PUB Driver above)
 // ---------------------------------------------------------------------------
 
-/// Async driver for a ZMTP 3.1 RADIO [`RadioConnection`].
+/// Async driver for a ZMTP 3.1 RADIO [`crate::radio_connection::RadioConnection`].
 ///
-/// Generic parameters mirror [`RadioConnection`]:
+/// Generic parameters mirror [`crate::radio_connection::RadioConnection`]:
 /// - `GROUP_CAP`    — maximum simultaneous peer group memberships
 /// - `GROUP_LEN_CAP` — maximum bytes per group name
 /// - `FRAME_CAP`  — frame-decoder body buffer size
