@@ -234,7 +234,8 @@ where
 mod tests {
     use super::*;
     use crate::test_helpers::{
-        pub_ready, sub_greeting, sub_ready, sub_subscribe, sync_mock::MockTransport,
+        pub_ready, sub_greeting, sub_ready, sub_subscribe,
+        sync_mock::{ChunkedReadTransport, MockTransport, WriteFailTransport},
     };
     use embedded_io::{ErrorKind, Read, Write};
 
@@ -399,6 +400,50 @@ mod tests {
         let written = driver.transport.written();
         assert!(written.len() > 91);
         assert_eq!(written[91], 0x04); // COMMAND flag
+    }
+
+    #[test]
+    fn driver_chunked_read_completes_handshake() {
+        let mut peer_bytes = alloc::vec::Vec::new();
+        peer_bytes.extend_from_slice(&sub_greeting());
+        peer_bytes.extend_from_slice(&sub_ready());
+
+        let mut driver =
+            Driver::<8, 32, 512, _>::new(ChunkedReadTransport::new(peer_bytes)).unwrap();
+        while !driver.poll().unwrap() {}
+        assert_eq!(*driver.conn.state(), State::Established);
+    }
+
+    #[test]
+    fn driver_new_greeting_write_error() {
+        let result =
+            Driver::<8, 32, 512, _>::new(WriteFailTransport::new(alloc::vec::Vec::new(), 0));
+        assert!(matches!(result, Err(ConnError::IoError(_))));
+    }
+
+    #[test]
+    fn driver_publish_write_error() {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&sub_greeting());
+        peer.extend_from_slice(&sub_ready());
+        peer.extend_from_slice(&sub_subscribe(b"foo"));
+
+        let mut driver = Driver::<8, 32, 512, _>::new(WriteFailTransport::new(peer, 3)).unwrap();
+        while !driver.poll().unwrap() {}
+        assert!(matches!(
+            driver.publish(b"foo", b"bar"),
+            Err(ConnError::IoError(_))
+        ));
+    }
+
+    #[test]
+    fn driver_drain_buffer_write_rest_error() {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&sub_greeting());
+        peer.extend_from_slice(&sub_ready());
+
+        let mut driver = Driver::<8, 32, 512, _>::new(WriteFailTransport::new(peer, 1)).unwrap();
+        assert!(matches!(driver.poll(), Err(ConnError::IoError(_))));
     }
 }
 
@@ -593,7 +638,8 @@ where
 mod radio_tests {
     use super::*;
     use crate::test_helpers::{
-        dish_greeting, dish_join, dish_ready, radio_ready, sync_mock::MockTransport,
+        dish_greeting, dish_join, dish_ready, radio_ready,
+        sync_mock::{ChunkedReadTransport, MockTransport, WriteFailTransport},
     };
     use embedded_io::{ErrorKind, Read, Write};
 
@@ -758,6 +804,55 @@ mod radio_tests {
         assert!(written.len() > 93);
         assert_eq!(written[93], 0x04); // COMMAND flag
     }
+
+    #[test]
+    fn radio_driver_chunked_read_completes_handshake() {
+        let mut peer_bytes = alloc::vec::Vec::new();
+        peer_bytes.extend_from_slice(&dish_greeting());
+        peer_bytes.extend_from_slice(&dish_ready());
+
+        let mut driver =
+            RadioDriver::<8, 32, 512, _>::new(ChunkedReadTransport::new(peer_bytes)).unwrap();
+        while !driver.poll().unwrap() {}
+        assert_eq!(
+            *driver.conn.state(),
+            crate::radio_connection::State::Established
+        );
+    }
+
+    #[test]
+    fn radio_driver_new_greeting_write_error() {
+        let result =
+            RadioDriver::<8, 32, 512, _>::new(WriteFailTransport::new(alloc::vec::Vec::new(), 0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn radio_driver_publish_write_error() {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&dish_greeting());
+        peer.extend_from_slice(&dish_ready());
+        peer.extend_from_slice(&dish_join(b"foo"));
+
+        let mut driver =
+            RadioDriver::<8, 32, 512, _>::new(WriteFailTransport::new(peer, 3)).unwrap();
+        while !driver.poll().unwrap() {}
+        assert!(matches!(
+            driver.publish(b"foo", b"bar"),
+            Err(crate::radio_connection::ConnError::IoError(_))
+        ));
+    }
+
+    #[test]
+    fn radio_driver_drain_buffer_write_rest_error() {
+        let mut peer = alloc::vec::Vec::new();
+        peer.extend_from_slice(&dish_greeting());
+        peer.extend_from_slice(&dish_ready());
+
+        let mut driver =
+            RadioDriver::<8, 32, 512, _>::new(WriteFailTransport::new(peer, 1)).unwrap();
+        assert!(driver.poll().is_err());
+    }
 }
 
 #[cfg(all(test, feature = "plain"))]
@@ -765,7 +860,7 @@ mod plain_driver_tests {
     use super::*;
     use crate::test_helpers::{
         plain_hello, plain_sub_greeting, pub_ready, sub_ready, sub_subscribe,
-        sync_mock::MockTransport,
+        sync_mock::{ChunkedReadTransport, MockTransport, WriteFailTransport},
     };
 
     extern crate alloc;
@@ -868,7 +963,8 @@ mod plain_driver_tests {
         peer.extend_from_slice(&plain_hello(b"wrong", b"creds"));
 
         let mut driver =
-            Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), RejectAll).unwrap();
+            Driver::<8, 32, 512, _, _>::new_plain(ChunkedReadTransport::new(peer), RejectAll)
+                .unwrap();
 
         let found_err = loop {
             match driver.poll() {
@@ -878,5 +974,14 @@ mod plain_driver_tests {
             }
         };
         assert!(found_err, "Bad credentials should produce an error");
+    }
+
+    #[test]
+    fn plain_driver_new_plain_greeting_write_error() {
+        let result = Driver::<8, 32, 512, _, AcceptAll>::new_plain(
+            WriteFailTransport::new(alloc::vec::Vec::new(), 0),
+            AcceptAll,
+        );
+        assert!(matches!(result, Err(ConnError::IoError(_))));
     }
 }

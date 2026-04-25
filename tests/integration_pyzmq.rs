@@ -5,10 +5,12 @@
 
 #[cfg(feature = "python-tests")]
 mod python_tests {
-    use std::io::{BufRead, BufReader};
+    use std::io::{self, BufRead, BufReader};
     use std::net::TcpStream;
-    use std::process::{Child, Command, Stdio};
-    use std::time::Duration;
+    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[cfg(feature = "sync")]
     use embedded_io_adapters::std::FromStd;
@@ -31,12 +33,38 @@ mod python_tests {
         }
     }
 
+    /// Drain a child's stdout into an mpsc channel, one line per message.
+    ///
+    /// The thread is detached. It exits when the pipe closes (EOF after the
+    /// `ChildGuard` kills the child) or when the receiver is dropped.
+    fn spawn_line_reader(stdout: ChildStdout) -> Receiver<io::Result<String>> {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut buf = String::new();
+                match reader.read_line(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if tx.send(Ok(buf)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        rx
+    }
+
     /// Spawn a Python SUB listener on an ephemeral port.
     ///
-    /// Returns (guard, port, stdout reader).
-    fn spawn_sub_listener(
-        topic_prefix: &str,
-    ) -> (ChildGuard, u16, BufReader<std::process::ChildStdout>) {
+    /// Returns (guard, port, line receiver). The receiver yields each stdout
+    /// line as `Ok(String)` and surfaces pipe errors as `Err`.
+    fn spawn_sub_listener(topic_prefix: &str) -> (ChildGuard, u16, Receiver<io::Result<String>>) {
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -55,31 +83,31 @@ mod python_tests {
 
         let mut guard = ChildGuard::new(child);
         let stdout = guard.0.stdout.take().unwrap();
-        let mut reader = BufReader::new(stdout);
+        let rx = spawn_line_reader(stdout);
 
-        let mut line = String::new();
-        let timeout = Duration::from_secs(5);
-        let start = std::time::Instant::now();
-
-        while start.elapsed() < timeout {
-            if reader.read_line(&mut line).is_ok() && line.contains("READY") {
-                return (guard, port, reader);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            match rx.recv_timeout(remaining) {
+                Ok(Ok(line)) if line.contains("READY") => return (guard, port, rx),
+                Ok(Ok(_)) => continue,
+                Ok(Err(e)) => panic!("Python SUB stdout read error before READY: {e}"),
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("Python SUB stdout closed before READY")
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("Python SUB listener did not become ready within 5s")
+                }
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
-
-        panic!(
-            "Python SUB listener did not become ready within {:?}",
-            timeout
-        );
     }
 
     #[test]
     #[cfg(feature = "sync")]
     fn pyzmq_sub_receives_single_publish() {
-        use std::time::Instant;
-
-        let (_guard, port, mut reader) = spawn_sub_listener("");
+        let (_guard, port, rx) = spawn_sub_listener("");
 
         let stream = TcpStream::connect(format!("127.0.0.1:{}", port))
             .expect("failed to connect to Python SUB");
@@ -131,28 +159,27 @@ mod python_tests {
         }
         assert!(wrote > 0, "Should eventually publish once peer subscribes");
 
-        let timeout = Duration::from_secs(2);
-        let start = Instant::now();
-        let mut line = String::new();
-
-        while start.elapsed() < timeout {
-            if reader.read_line(&mut line).is_ok() && !line.is_empty() {
-                println!("Received: {}", line.trim());
-
-                let parts: Vec<&str> = line.trim().split(':').collect();
-                assert_eq!(parts.len(), 2, "Expected format: hex(topic):hex(payload)");
-
-                let received_topic = hex::decode(parts[0]).expect("topic should be valid hex");
-                let received_payload = hex::decode(parts[1]).expect("payload should be valid hex");
-
-                assert_eq!(received_topic, topic, "Topic should match");
-                assert_eq!(received_payload, payload, "Payload should match");
-                return;
+        let line = match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => panic!("stdout read error: {e}"),
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("No message received from Python SUB within timeout")
             }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("Python SUB stdout closed before producing a message")
+            }
+        };
 
-        panic!("No message received from Python SUB within timeout");
+        println!("Received: {}", line.trim());
+
+        let parts: Vec<&str> = line.trim().split(':').collect();
+        assert_eq!(parts.len(), 2, "Expected format: hex(topic):hex(payload)");
+
+        let received_topic = hex::decode(parts[0]).expect("topic should be valid hex");
+        let received_payload = hex::decode(parts[1]).expect("payload should be valid hex");
+
+        assert_eq!(received_topic, topic, "Topic should match");
+        assert_eq!(received_payload, payload, "Payload should match");
     }
 
     #[cfg(all(feature = "async", feature = "std"))]
@@ -198,10 +225,9 @@ mod python_tests {
     #[cfg(all(feature = "async", feature = "std"))]
     async fn async_pyzmq_sub_receives_single_publish() {
         use mzmq::io::r#async::Driver;
-        use std::time::Instant;
         use tokio_helpers::AsyncTransport;
 
-        let (_guard, port, mut reader) = spawn_sub_listener("");
+        let (_guard, port, rx) = spawn_sub_listener("");
 
         let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
@@ -248,29 +274,32 @@ mod python_tests {
         }
         assert!(wrote > 0, "Should eventually publish once peer subscribes");
 
-        // Read back from Python SUB
-        let timeout = Duration::from_secs(2);
-        let start = Instant::now();
-        let mut line = String::new();
+        let recv_result =
+            tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(2)))
+                .await
+                .expect("reader task panicked");
 
-        while start.elapsed() < timeout {
-            if reader.read_line(&mut line).is_ok() && !line.is_empty() {
-                println!("Received: {}", line.trim());
-
-                let parts: Vec<&str> = line.trim().split(':').collect();
-                assert_eq!(parts.len(), 2, "Expected format: hex(topic):hex(payload)");
-
-                let received_topic = hex::decode(parts[0]).expect("topic should be valid hex");
-                let received_payload = hex::decode(parts[1]).expect("payload should be valid hex");
-
-                assert_eq!(received_topic, topic.as_ref(), "Topic should match");
-                assert_eq!(received_payload, payload.as_ref(), "Payload should match");
-                return;
+        let line = match recv_result {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => panic!("stdout read error: {e}"),
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("No message received from Python SUB within timeout")
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("Python SUB stdout closed before producing a message")
+            }
+        };
 
-        panic!("No message received from Python SUB within timeout");
+        println!("Received: {}", line.trim());
+
+        let parts: Vec<&str> = line.trim().split(':').collect();
+        assert_eq!(parts.len(), 2, "Expected format: hex(topic):hex(payload)");
+
+        let received_topic = hex::decode(parts[0]).expect("topic should be valid hex");
+        let received_payload = hex::decode(parts[1]).expect("payload should be valid hex");
+
+        assert_eq!(received_topic, topic.as_ref(), "Topic should match");
+        assert_eq!(received_payload, payload.as_ref(), "Payload should match");
     }
 }
 

@@ -190,6 +190,104 @@ pub(crate) mod sync_mock {
             Ok(())
         }
     }
+
+    /// Delivers peer bytes one at a time for testing partial-read drain-buffer
+    /// paths (consumed==0, buffer management).
+    pub struct ChunkedReadTransport {
+        peer_bytes: alloc::vec::Vec<u8>,
+        peer_pos: usize,
+    }
+
+    impl ChunkedReadTransport {
+        pub fn new(peer_bytes: alloc::vec::Vec<u8>) -> Self {
+            Self {
+                peer_bytes,
+                peer_pos: 0,
+            }
+        }
+    }
+
+    impl embedded_io::ErrorType for ChunkedReadTransport {
+        type Error = ErrorKind;
+    }
+
+    impl Read for ChunkedReadTransport {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if self.peer_pos >= self.peer_bytes.len() {
+                return Ok(0);
+            }
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = self.peer_bytes[self.peer_pos];
+            self.peer_pos += 1;
+            Ok(1)
+        }
+    }
+
+    impl Write for ChunkedReadTransport {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Succeeds for `fail_after` writes, then returns `BrokenPipe` on writes.
+    /// Used to test transport write-error propagation.
+    pub struct WriteFailTransport {
+        peer_bytes: alloc::vec::Vec<u8>,
+        peer_pos: usize,
+        our_bytes: alloc::vec::Vec<u8>,
+        write_count: usize,
+        fail_after: usize,
+    }
+
+    impl WriteFailTransport {
+        pub fn new(peer_bytes: alloc::vec::Vec<u8>, fail_after: usize) -> Self {
+            Self {
+                peer_bytes,
+                peer_pos: 0,
+                our_bytes: alloc::vec::Vec::new(),
+                write_count: 0,
+                fail_after,
+            }
+        }
+    }
+
+    impl embedded_io::ErrorType for WriteFailTransport {
+        type Error = ErrorKind;
+    }
+
+    impl Read for WriteFailTransport {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if self.peer_pos >= self.peer_bytes.len() {
+                return Ok(0);
+            }
+            let to_copy = core::cmp::min(buf.len(), self.peer_bytes.len() - self.peer_pos);
+            buf[..to_copy]
+                .copy_from_slice(&self.peer_bytes[self.peer_pos..self.peer_pos + to_copy]);
+            self.peer_pos += to_copy;
+            Ok(to_copy)
+        }
+    }
+
+    impl Write for WriteFailTransport {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.write_count += 1;
+            if self.write_count > self.fail_after {
+                return Err(ErrorKind::BrokenPipe);
+            }
+            self.our_bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(feature = "async")]
