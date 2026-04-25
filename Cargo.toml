@@ -25,4 +25,4 @@ predicates = "3.0"
 wait-timeout = "0.2"
 hex = "0.4"
 embedded-io-adapters = { version = "0.7", features = ["std"] }
-tokio = { version = "1", features = ["rt", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "net"] }
