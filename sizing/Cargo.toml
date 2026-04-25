@@ -29,6 +29,6 @@ cortex-m-rt = "0.7"
 
 [profile.release]
 panic = "abort"
-opt-level = 3
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
