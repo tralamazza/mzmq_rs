@@ -117,6 +117,23 @@ jobs:
               title, body, labels: ['fuzz', 'bug'],
             });
 
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: "llvm-tools-preview"
+          targets: "thumbv7em-none-eabihf"
+
+      - name: Expose llvm-size on PATH
+        run: |
+          TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          echo "$(rustc --print sysroot)/lib/rustlib/$TRIPLE/bin" >> "$GITHUB_PATH"
+
+      - run: bash scripts/measure_size.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
   coverage:
     runs-on: ubuntu-latest
     steps:
