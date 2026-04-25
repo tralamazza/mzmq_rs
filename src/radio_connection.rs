@@ -1,3 +1,4 @@
+use crate::auth::{AuthCheck, Mechanism};
 use crate::frame::decode_error::DecodeError;
 use crate::frame::{FrameDecoder, FrameError, MAX_FRAME_HEADER, encode_message_frame};
 use crate::greeting::{
@@ -10,7 +11,6 @@ use crate::group_table::GroupTable;
 use crate::null::{
     NullError, RADIO_READY_LEN, encode_error, encode_ready_radio, parse_ready_radio_from,
 };
-use crate::plain::AuthCheck;
 #[cfg(feature = "plain")]
 use crate::plain::{PlainError, WELCOME_LEN, encode_welcome, parse_hello_from};
 
@@ -57,19 +57,16 @@ pub struct RadioConnection<
     peer_greeting_received: bool,
     peer_version_minor: u8,
     our_ready_sent: bool,
-    #[cfg(feature = "plain")]
+    #[cfg_attr(not(feature = "plain"), allow(dead_code))]
     our_welcome_sent: bool,
-    #[cfg(feature = "plain")]
-    is_plain: bool,
+    mechanism: Mechanism,
     greeting_buf: [u8; 64],
     greeting_pos: usize,
     frame_decoder: FrameDecoder<FRAME_CAP>,
     group_table: GroupTable<GROUP_CAP, GROUP_LEN_CAP>,
     pending_pong: Option<([u8; 16], usize)>,
-    #[cfg(feature = "plain")]
+    #[cfg_attr(not(feature = "plain"), allow(dead_code))]
     auth: A,
-    #[cfg(not(feature = "plain"))]
-    _auth: core::marker::PhantomData<A>,
 }
 
 impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
@@ -85,19 +82,14 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
             peer_greeting_received: false,
             peer_version_minor: 0,
             our_ready_sent: false,
-            #[cfg(feature = "plain")]
             our_welcome_sent: false,
-            #[cfg(feature = "plain")]
-            is_plain: false,
+            mechanism: Mechanism::Null,
             greeting_buf: [0u8; 64],
             greeting_pos: 0,
             frame_decoder: FrameDecoder::new(),
             group_table: GroupTable::new(),
             pending_pong: None,
-            #[cfg(feature = "plain")]
             auth: (),
-            #[cfg(not(feature = "plain"))]
-            _auth: core::marker::PhantomData,
         }
     }
 }
@@ -129,7 +121,7 @@ where
             peer_version_minor: 0,
             our_ready_sent: false,
             our_welcome_sent: false,
-            is_plain: true,
+            mechanism: Mechanism::Plain,
             greeting_buf: [0u8; 64],
             greeting_pos: 0,
             frame_decoder: FrameDecoder::new(),
@@ -196,29 +188,19 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
             return Err(ConnError::BufferTooSmall);
         }
         let mut arr = [0u8; GREETING_LEN];
-        #[cfg(not(feature = "plain"))]
-        encode_greeting(&mut arr);
-        #[cfg(feature = "plain")]
-        if self.is_plain {
-            encode_plain_greeting(&mut arr);
-        } else {
-            encode_greeting(&mut arr);
+        match self.mechanism {
+            Mechanism::Null => encode_greeting(&mut arr),
+            #[cfg(feature = "plain")]
+            Mechanism::Plain => encode_plain_greeting(&mut arr),
         }
         out[..rest_len].copy_from_slice(&arr[GREETING_PARTIAL_LEN..]);
         self.our_greeting_sent = true;
         if self.peer_greeting_received {
-            #[cfg(not(feature = "plain"))]
-            {
-                self.state = State::Ready;
-            }
-            #[cfg(feature = "plain")]
-            {
-                self.state = if self.is_plain {
-                    State::PlainHello
-                } else {
-                    State::Ready
-                };
-            }
+            self.state = match self.mechanism {
+                Mechanism::Null => State::Ready,
+                #[cfg(feature = "plain")]
+                Mechanism::Plain => State::PlainHello,
+            };
         }
         Ok(rest_len)
     }
@@ -241,11 +223,14 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
     /// Returns `ConnError::WrongState` if not in `Ready` state (or `PlainReady` for PLAIN).
     /// Returns `ConnError::BufferTooSmall` if `out` is smaller than `RADIO_READY_LEN`.
     pub fn write_ready(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
-        #[cfg(not(feature = "plain"))]
-        let in_ready_state = self.state == State::Ready;
-        #[cfg(feature = "plain")]
-        let in_ready_state = self.state == State::Ready
-            || (self.state == State::PlainReady && self.our_welcome_sent);
+        let in_ready_state = match self.mechanism {
+            Mechanism::Null => self.state == State::Ready,
+            #[cfg(feature = "plain")]
+            Mechanism::Plain => {
+                self.state == State::Ready
+                    || (self.state == State::PlainReady && self.our_welcome_sent)
+            }
+        };
         if !in_ready_state {
             return Err(ConnError::WrongState);
         }
@@ -299,30 +284,23 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
         }
 
         if self.greeting_pos == GREETING_LEN {
-            #[cfg(not(feature = "plain"))]
-            let peer_greeting =
-                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?;
-            #[cfg(feature = "plain")]
-            let peer_greeting = if self.is_plain {
-                parse_plain_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
-            } else {
-                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+            let peer_greeting = match self.mechanism {
+                Mechanism::Null => {
+                    parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+                }
+                #[cfg(feature = "plain")]
+                Mechanism::Plain => {
+                    parse_plain_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+                }
             };
             self.peer_version_minor = peer_greeting.version_minor;
             self.peer_greeting_received = true;
             if self.our_greeting_sent {
-                #[cfg(not(feature = "plain"))]
-                {
-                    self.state = State::Ready;
-                }
-                #[cfg(feature = "plain")]
-                {
-                    self.state = if self.is_plain {
-                        State::PlainHello
-                    } else {
-                        State::Ready
-                    };
-                }
+                self.state = match self.mechanism {
+                    Mechanism::Null => State::Ready,
+                    #[cfg(feature = "plain")]
+                    Mechanism::Plain => State::PlainHello,
+                };
             }
         }
 

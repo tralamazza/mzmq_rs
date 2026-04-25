@@ -1,3 +1,4 @@
+use crate::auth::{AuthCheck, Mechanism};
 use crate::frame::decode_error::DecodeError;
 use crate::frame::{FrameDecoder, FrameError, MAX_FRAME_HEADER, encode_message_frame};
 use crate::greeting::{
@@ -7,7 +8,6 @@ use crate::greeting::{
 #[cfg(feature = "plain")]
 use crate::greeting::{encode_plain_greeting, parse_plain_greeting};
 use crate::null::{NullError, READY_LEN, encode_error, encode_ready, parse_ready_from};
-use crate::plain::AuthCheck;
 #[cfg(feature = "plain")]
 use crate::plain::{PlainError, WELCOME_LEN, encode_welcome, parse_hello_from};
 use crate::sub_table::SubTable;
@@ -55,19 +55,16 @@ pub struct Connection<
     peer_greeting_received: bool,
     peer_version_minor: u8,
     our_ready_sent: bool,
-    #[cfg(feature = "plain")]
+    #[cfg_attr(not(feature = "plain"), allow(dead_code))]
     our_welcome_sent: bool,
-    #[cfg(feature = "plain")]
-    is_plain: bool,
+    mechanism: Mechanism,
     greeting_buf: [u8; 64],
     greeting_pos: usize,
     frame_decoder: FrameDecoder<FRAME_CAP>,
     sub_table: SubTable<SUB_CAP, PREFIX_CAP>,
     pending_pong: Option<([u8; 16], usize)>,
-    #[cfg(feature = "plain")]
+    #[cfg_attr(not(feature = "plain"), allow(dead_code))]
     auth: A,
-    #[cfg(not(feature = "plain"))]
-    _auth: core::marker::PhantomData<A>,
 }
 
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
@@ -83,19 +80,14 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize>
             peer_greeting_received: false,
             peer_version_minor: 0,
             our_ready_sent: false,
-            #[cfg(feature = "plain")]
             our_welcome_sent: false,
-            #[cfg(feature = "plain")]
-            is_plain: false,
+            mechanism: Mechanism::Null,
             greeting_buf: [0u8; 64],
             greeting_pos: 0,
             frame_decoder: FrameDecoder::new(),
             sub_table: SubTable::new(),
             pending_pong: None,
-            #[cfg(feature = "plain")]
             auth: (),
-            #[cfg(not(feature = "plain"))]
-            _auth: core::marker::PhantomData,
         }
     }
 }
@@ -127,13 +119,13 @@ where
             peer_version_minor: 0,
             our_ready_sent: false,
             our_welcome_sent: false,
-            is_plain: true,
+            mechanism: Mechanism::Plain,
             greeting_buf: [0u8; 64],
             greeting_pos: 0,
             frame_decoder: FrameDecoder::new(),
             sub_table: SubTable::new(),
             pending_pong: None,
-            auth, // only compiled when plain feature is enabled
+            auth,
         }
     }
 }
@@ -194,29 +186,19 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
             return Err(ConnError::BufferTooSmall);
         }
         let mut arr = [0u8; GREETING_LEN];
-        #[cfg(not(feature = "plain"))]
-        encode_greeting(&mut arr);
-        #[cfg(feature = "plain")]
-        if self.is_plain {
-            encode_plain_greeting(&mut arr);
-        } else {
-            encode_greeting(&mut arr);
+        match self.mechanism {
+            Mechanism::Null => encode_greeting(&mut arr),
+            #[cfg(feature = "plain")]
+            Mechanism::Plain => encode_plain_greeting(&mut arr),
         }
         out[..rest_len].copy_from_slice(&arr[GREETING_PARTIAL_LEN..]);
         self.our_greeting_sent = true;
         if self.peer_greeting_received {
-            #[cfg(not(feature = "plain"))]
-            {
-                self.state = State::Ready;
-            }
-            #[cfg(feature = "plain")]
-            {
-                self.state = if self.is_plain {
-                    State::PlainHello
-                } else {
-                    State::Ready
-                };
-            }
+            self.state = match self.mechanism {
+                Mechanism::Null => State::Ready,
+                #[cfg(feature = "plain")]
+                Mechanism::Plain => State::PlainHello,
+            };
         }
         Ok(rest_len)
     }
@@ -239,11 +221,14 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
     /// Returns `ConnError::WrongState` if not in `Ready` state (or `PlainReady` for PLAIN).
     /// Returns `ConnError::BufferTooSmall` if `out` is smaller than `READY_LEN`.
     pub fn write_ready(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
-        #[cfg(not(feature = "plain"))]
-        let in_ready_state = self.state == State::Ready;
-        #[cfg(feature = "plain")]
-        let in_ready_state = self.state == State::Ready
-            || (self.state == State::PlainReady && self.our_welcome_sent);
+        let in_ready_state = match self.mechanism {
+            Mechanism::Null => self.state == State::Ready,
+            #[cfg(feature = "plain")]
+            Mechanism::Plain => {
+                self.state == State::Ready
+                    || (self.state == State::PlainReady && self.our_welcome_sent)
+            }
+        };
         if !in_ready_state {
             return Err(ConnError::WrongState);
         }
@@ -297,30 +282,23 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
         }
 
         if self.greeting_pos == GREETING_LEN {
-            #[cfg(not(feature = "plain"))]
-            let peer_greeting =
-                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?;
-            #[cfg(feature = "plain")]
-            let peer_greeting = if self.is_plain {
-                parse_plain_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
-            } else {
-                parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+            let peer_greeting = match self.mechanism {
+                Mechanism::Null => {
+                    parse_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+                }
+                #[cfg(feature = "plain")]
+                Mechanism::Plain => {
+                    parse_plain_greeting(&self.greeting_buf).map_err(ConnError::GreetingError)?
+                }
             };
             self.peer_version_minor = peer_greeting.version_minor;
             self.peer_greeting_received = true;
             if self.our_greeting_sent {
-                #[cfg(not(feature = "plain"))]
-                {
-                    self.state = State::Ready;
-                }
-                #[cfg(feature = "plain")]
-                {
-                    self.state = if self.is_plain {
-                        State::PlainHello
-                    } else {
-                        State::Ready
-                    };
-                }
+                self.state = match self.mechanism {
+                    Mechanism::Null => State::Ready,
+                    #[cfg(feature = "plain")]
+                    Mechanism::Plain => State::PlainHello,
+                };
             }
         }
 
