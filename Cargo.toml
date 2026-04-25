@@ -8,10 +8,13 @@ description = "Minimal no_std ZMQ (ZMTP 3.1) PUB transport for embedded"
 repository = "https://github.com/tralamazza/mzmq_rs"
 homepage = "https://github.com/tralamazza/mzmq_rs"
 documentation = "https://docs.rs/mzmq"
+keywords     = ["zmq", "zmtp", "no-std", "embedded", "pubsub"]
+categories   = ["embedded", "network-programming", "no-std"]
 
 [package.metadata.docs.rs]
-features = ["std", "sync", "plain"]
-targets = ["x86_64-unknown-linux-gnu"]
+all-features  = true
+targets       = ["x86_64-unknown-linux-gnu"]
+rustdoc-args  = ["--cfg", "docsrs"]
 
 [features]
 default = ["sync"]

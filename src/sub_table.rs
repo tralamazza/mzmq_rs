@@ -1,3 +1,5 @@
+//! Subscription table for PUB-SUB: tracks active prefix filters from connected SUB peers.
+
 use heapless::Vec;
 
 /// Errors returned by [`SubTable`] operations.

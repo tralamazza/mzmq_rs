@@ -1,3 +1,5 @@
+//! ZMTP 3.1 RADIO connection state machine (RFC 48).
+
 use crate::auth::{AuthCheck, Mechanism};
 use crate::frame::decode_error::DecodeError;
 use crate::frame::{FrameDecoder, FrameError, MAX_FRAME_HEADER, encode_message_frame};

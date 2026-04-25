@@ -1,3 +1,5 @@
+//! ZMTP 3.1 greeting frame encoding and parsing.
+
 /// Fixed size of a ZMTP 3.1 greeting frame in bytes.
 pub const GREETING_LEN: usize = 64;
 /// Number of bytes in the partial greeting (signature + version major).
@@ -21,9 +23,13 @@ pub struct PeerGreeting {
 /// Errors returned when parsing a peer greeting.
 #[derive(Debug, PartialEq)]
 pub enum GreetingError {
+    /// Signature bytes (byte 0 = `0xFF`, byte 9 = `0x7F`) do not match.
     InvalidSignature,
+    /// ZMTP major version is not 3.
     UnsupportedVersionMajor,
+    /// Security mechanism field is not the one this library expects.
     UnsupportedMechanism,
+    /// Peer set `as_server = 1` when this library requires `as_server = 0`.
     InvalidAsServer,
 }
 

@@ -2,7 +2,7 @@
 
 [![Rust CI](https://github.com/tralamazza/mzmq_rs/actions/workflows/ci.yml/badge.svg)](https://github.com/tralamazza/mzmq_rs/actions/workflows/ci.yml)
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-blue)](https://github.com/rust-lang/rust/releases/tag/1.88.0)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
 A `no_std`, `no_alloc` Rust library that speaks [ZMTP 3.1](https://rfc.zeromq.org/spec/37/) as a **PUB** or **RADIO** endpoint. Built for Cortex-M-class targets that need to publish telemetry to ZMQ-based tooling without linking libzmq or pulling in `tokio`.
 
@@ -23,7 +23,7 @@ mzmq = "0.1"
 
 ### PUB-SUB
 
-```rust
+```rust,no_run
 use embedded_io_adapters::std::FromStd;
 use mzmq::io::sync::Driver;
 use std::net::TcpStream;
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Groups are matched by **exact byte equality**, unlike the prefix matching of PUB-SUB.
 
-```rust
+```rust,no_run
 use embedded_io_adapters::std::FromStd;
 use mzmq::io::sync::RadioDriver;
 use std::net::TcpStream;
@@ -77,7 +77,7 @@ Enable the `plain` feature and use `Driver::new_plain(transport, authenticator)`
 must implement `mzmq::plain::Authenticator`. PLAIN transmits credentials in clear text — only
 use over trusted or encrypted transports.
 
-```rust
+```rust,no_run
 use mzmq::io::sync::Driver;
 use mzmq::plain::Authenticator;
 
@@ -102,7 +102,7 @@ let mut driver = Driver::<8, 32, 1024, _, _>::new_plain(transport, auth)?;
 | `plain` | no | ZMTP PLAIN security mechanism (RFC 27) — server role |
 | `python-tests` | no | Integration tests against a real `pyzmq` process |
 
-## no_std / embedded targets
+## `no_std` / embedded targets
 
 The sans-IO core compiles with no default features:
 

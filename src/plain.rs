@@ -18,6 +18,7 @@ impl<A: Authenticator> crate::auth::AuthCheck for A {
 /// Implementations should use constant-time comparison to avoid timing side-channels.
 #[cfg(feature = "plain")]
 pub trait Authenticator {
+    /// Returns `true` if `username` / `password` should be accepted.
     fn authenticate(&self, username: &[u8], password: &[u8]) -> bool;
 }
 

@@ -1,9 +1,14 @@
+//! ZMTP frame encoding and streaming decoding.
+
 /// Maximum header overhead: 9 bytes (long frame)
 pub const MAX_FRAME_HEADER: usize = 9;
 
+/// Errors returned by frame encoding functions.
 #[derive(Debug, PartialEq)]
 pub enum FrameError {
+    /// Output buffer is too small to hold the frame header.
     BufferTooSmall,
+    /// Flags byte contained bits that are reserved in the ZMTP spec.
     ReservedFlagBits,
 }
 
@@ -65,6 +70,7 @@ pub fn encode_command_frame(buf: &mut [u8], body_len: usize) -> Result<usize, Fr
 
 /// Errors returned by [`FrameDecoder::feed`].
 pub mod decode_error {
+    /// Errors produced by the streaming frame decoder.
     #[derive(Debug, PartialEq)]
     pub enum DecodeError {
         /// Flags byte had reserved bits (3-7) set.
@@ -81,8 +87,11 @@ use decode_error::DecodeError;
 /// A fully decoded frame. The body borrows from the decoder's internal buffer.
 #[derive(Debug, PartialEq)]
 pub struct DecodedFrame<'a> {
+    /// `true` if the ZMTP MORE flag is set (additional frames follow).
     pub more: bool,
+    /// `true` if this is a COMMAND frame rather than a MESSAGE frame.
     pub is_command: bool,
+    /// Frame body bytes.
     pub body: &'a [u8],
 }
 

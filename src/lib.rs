@@ -1,3 +1,8 @@
+//! A `no_std`, `no_alloc` ZMTP 3.1 PUB/RADIO library for embedded targets.
+#![cfg_attr(docsrs, doc = include_str!("../README.md"))]
+#![warn(missing_docs)]
+#![warn(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::private_intra_doc_links)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 #![cfg_attr(not(feature = "std"), no_std)]

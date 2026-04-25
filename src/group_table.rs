@@ -1,3 +1,5 @@
+//! Group registry for RADIO-DISH: tracks which groups a DISH peer has joined.
+
 use heapless::Vec;
 
 /// Errors returned by [`GroupTable`] operations.

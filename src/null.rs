@@ -1,4 +1,4 @@
-// ZMTP NULL security mechanism — READY and ERROR commands (RFC 23)
+//! ZMTP NULL security mechanism — READY and ERROR commands (RFC 23).
 
 /// Length of the PUB READY command frame.
 pub const READY_LEN: usize = 27;
