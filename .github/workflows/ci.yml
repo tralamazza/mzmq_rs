@@ -20,6 +20,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   no-std:
+    needs: [lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -32,6 +33,7 @@ jobs:
       - run: cargo build --no-default-features --target thumbv7em-none-eabihf
 
   interop:
+    needs: [lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -44,6 +46,7 @@ jobs:
       - run: cargo test --features python-tests,plain -- --test-threads=1
 
   fuzz:
+    needs: [lint]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -118,6 +121,7 @@ jobs:
             });
 
   size:
+    needs: [lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -135,6 +139,7 @@ jobs:
       - run: bash scripts/measure_size.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
   coverage:
+    needs: [lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

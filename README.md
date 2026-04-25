@@ -143,3 +143,11 @@ This bumps the version in `Cargo.toml`, commits, tags `vX.Y.Z`, and pushes. The
 
 Required secret on the repo: `CARGO_REGISTRY_TOKEN` (crates.io API token with
 publish scope).
+
+## Development
+
+Install git hooks:
+
+```bash
+git config core.hooksPath .githooks
+```
