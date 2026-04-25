@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 description = "Minimal no_std ZMQ (ZMTP 3.1) PUB transport for embedded"
+repository = "https://github.com/tralamazza/mzmq_rs"
+homepage = "https://github.com/tralamazza/mzmq_rs"
+documentation = "https://docs.rs/mzmq"
 
 [package.metadata.docs.rs]
 features = ["std", "sync", "plain"]
