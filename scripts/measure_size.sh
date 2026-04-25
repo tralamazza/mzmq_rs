@@ -113,7 +113,28 @@ emit_table() {
     done
 }
 
-host_triple="$(rustc -vV | awk '/^host:/ {print $2}')"
+rustc_vv="$(rustc -vV)"
+host_triple="$(echo "$rustc_vv" | awk '/^host:/ {print $2}')"
+
+echo "## Toolchain & build options"
+echo ""
+echo '```'
+echo "# rustc"
+echo "$rustc_vv"
+echo ""
+echo "# cargo"
+cargo -V
+echo ""
+echo "# sizing/Cargo.toml [profile.release]"
+awk '/^\[profile\.release\]/{flag=1; print; next} /^\[/{flag=0} flag' "$REPO_ROOT/sizing/Cargo.toml"
+echo ""
+echo "# sizing/.cargo/config.toml [target.thumbv7em-none-eabihf]"
+awk '/^\[target\.thumbv7em-none-eabihf\]/{flag=1; print; next} /^\[/{flag=0} flag' "$REPO_ROOT/sizing/.cargo/config.toml"
+echo ""
+echo "# cargo build invocation (per combo)"
+echo 'cargo build --release --bin <mzmq-sizing|mzmq-sizing-baseline> [--target=<triple>] [--features <...>]'
+echo '```'
+echo ""
 
 echo "## Host (\`$host_triple\`, Mach-O \`__TEXT\` code+const, bytes)"
 echo ""
