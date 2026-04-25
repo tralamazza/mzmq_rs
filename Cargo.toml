@@ -6,6 +6,10 @@ rust-version = "1.88"
 license = "Apache-2.0"
 description = "Minimal no_std ZMQ (ZMTP 3.1) PUB transport for embedded"
 
+[package.metadata.docs.rs]
+features = ["std", "sync", "plain"]
+targets = ["x86_64-unknown-linux-gnu"]
+
 [features]
 default = ["sync"]
 std = []

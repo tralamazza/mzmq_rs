@@ -42,8 +42,18 @@ pub enum State {
 /// `GROUP_LEN_CAP` = max bytes per group name.
 /// `FRAME_CAP` = max body bytes buffered in the internal frame decoder.
 /// `A` = authenticator type; use the default `()` for the NULL mechanism,
-///       or supply an [`Authenticator`](crate::plain::Authenticator) and construct via
-///       [`RadioConnection::new_plain`] for the PLAIN mechanism (requires the `plain` feature).
+#[cfg_attr(
+    feature = "plain",
+    doc = "      or supply an [`Authenticator`](crate::plain::Authenticator) and construct via"
+)]
+#[cfg_attr(
+    feature = "plain",
+    doc = "      [`RadioConnection::new_plain`] for the PLAIN mechanism."
+)]
+#[cfg_attr(
+    not(feature = "plain"),
+    doc = "      or construct via [`RadioConnection::new`]."
+)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct RadioConnection<
     const GROUP_CAP: usize,
