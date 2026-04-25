@@ -1070,6 +1070,49 @@ mod tests {
         assert_eq!(combined, expected);
     }
 
+    // Test 29: feed in Failed state returns WrongState
+    #[test]
+    fn feed_in_failed_state_returns_wrong_state() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        let mut out = [0u8; 64];
+        conn.write_greeting(&mut out).unwrap();
+        conn.feed(&sub_greeting()).unwrap();
+        conn.write_greeting_rest(&mut out).unwrap();
+        let mut ready_out = [0u8; 32];
+        conn.write_ready(&mut ready_out).unwrap();
+        let _ = conn.feed(&push_ready()); // → Failed state
+        assert_eq!(conn.state(), &State::Failed);
+        assert_eq!(conn.feed(&[0x00u8, 0x01, 0x00]), Err(ConnError::WrongState));
+    }
+
+    // Test 30: ZMTP 3.0 message with unknown prefix byte is silently ignored
+    #[test]
+    fn zmtp30_unknown_prefix_byte_ignored() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        do_handshake(&mut conn);
+        // prefix byte 0x02 is neither subscribe (0x01) nor cancel (0x00)
+        let msg_frame = [0x00u8, 0x04, 0x02, b'f', b'o', b'o'];
+        conn.feed(&msg_frame).unwrap();
+        let mut buf = [0u8; 256];
+        assert_eq!(conn.publish(b"foo", b"x", &mut buf).unwrap(), 0);
+    }
+
+    // Test 31: write_pong with buffer too small returns BufferTooSmall
+    #[test]
+    fn write_pong_buffer_too_small_returns_err() {
+        let mut conn: Connection<8, 32, 512> = Connection::new();
+        do_handshake(&mut conn);
+        let ping: &[u8] = &[
+            0x04, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
+        ];
+        conn.feed(ping).unwrap();
+        let mut tiny_buf = [0u8; 3]; // needs 9 bytes (2+1+4+2)
+        assert_eq!(
+            conn.write_pong(&mut tiny_buf),
+            Err(ConnError::BufferTooSmall)
+        );
+    }
+
     // ---------------------------------------------------------------------------
     // PLAIN mechanism tests
     // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 # Guidelines
 
 ## Dev environment tips
+- Run `brew list --formula` to display available tools and libraries.
 - Run `cargo clippy --all-targets --all-features` before committing.
 - Check code coverage with `cargo llvm-cov --all-features`.
 - Find the CI plans in the .github/workflows folder.

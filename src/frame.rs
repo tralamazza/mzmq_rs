@@ -588,4 +588,49 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn command_frame_buffer_too_small_short() {
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            encode_command_frame(&mut buf, 10),
+            Err(FrameError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn command_frame_buffer_too_small_long() {
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            encode_command_frame(&mut buf, 300),
+            Err(FrameError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn decode_poisoned_decoder_returns_error() {
+        let mut dec: FrameDecoder<64> = FrameDecoder::new();
+        let _ = dec.feed(&[0x08u8]); // reserved bit set → poisons the decoder
+        let result = dec.feed(&[0x00u8, 0x01, 0x00]);
+        assert_eq!(result, Err(DecodeError::ReservedFlagBits));
+    }
+
+    #[test]
+    fn decoder_reset_allows_reuse() {
+        let mut dec: FrameDecoder<64> = FrameDecoder::new();
+        dec.feed(&[0x00u8, 0x04]).unwrap(); // partial header only
+        dec.reset();
+        let result = dec.feed(&[0x00u8, 0x02, b'h', b'i']);
+        assert_eq!(
+            result,
+            Ok((
+                4,
+                Some(DecodedFrame {
+                    more: false,
+                    is_command: false,
+                    body: b"hi"
+                })
+            ))
+        );
+    }
 }

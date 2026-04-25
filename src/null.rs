@@ -489,4 +489,36 @@ mod tests {
         ];
         assert_eq!(parse_ready_radio(&frame), Err(NullError::WrongSocketType));
     }
+
+    // Non-"Socket-Type" property in READY is skipped; missing Socket-Type → WrongSocketType
+    #[test]
+    fn parse_ready_non_socket_type_property_skipped() {
+        // READY with an "Identity" property (8 bytes, not 11), value = "foo" (3 bytes)
+        // frame: flags(1) + body_size(1) + name_size(1) + "READY"(5) + prop_name_size(1) +
+        //        "Identity"(8) + val_size(4) + "foo"(3) = 24 bytes total
+        // body_size = 1+5+1+8+4+3 = 22
+        let mut frame = [0u8; 24];
+        frame[0] = 0x04; // COMMAND flag
+        frame[1] = 22; // body size
+        frame[2] = 0x05; // name_size
+        frame[3..8].copy_from_slice(b"READY");
+        frame[8] = 0x08; // prop_name_size = 8 ("Identity")
+        frame[9..17].copy_from_slice(b"Identity");
+        frame[17] = 0x00;
+        frame[18] = 0x00;
+        frame[19] = 0x00;
+        frame[20] = 0x03; // val_size = 3
+        frame[21..24].copy_from_slice(b"foo");
+        assert_eq!(parse_ready(&frame), Err(NullError::WrongSocketType));
+    }
+
+    #[test]
+    fn encode_error_buffer_too_small_returns_err() {
+        let reason = b"oops";
+        let mut buf = [0u8; 5]; // needs 2+1+5+1+4 = 13 bytes
+        assert_eq!(
+            encode_error(&mut buf, reason),
+            Err(NullError::BufferTooSmall)
+        );
+    }
 }

@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# Ensure rustfmt is available
+if ! command -v rustfmt >/dev/null 2>&1; then
+  echo "Error: rustfmt is not installed."
+  echo "Install it with: rustup component add rustfmt"
+  exit 1
+fi
+
+# Format the workspace
+cargo fmt --all
+
+# Re-stage formatted files
+git add -u

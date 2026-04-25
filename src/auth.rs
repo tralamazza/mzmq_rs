@@ -15,3 +15,14 @@ impl AuthCheck for () {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AuthCheck;
+
+    #[test]
+    fn unit_impl_always_returns_false() {
+        assert!(!().check(b"user", b"pass"));
+        assert!(!().check(b"", b""));
+    }
+}
