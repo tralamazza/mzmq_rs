@@ -154,6 +154,124 @@ mod python_tests {
 
         panic!("No message received from Python SUB within timeout");
     }
+
+    #[cfg(all(feature = "async", feature = "std"))]
+    mod tokio_helpers {
+        use tokio::net::TcpStream;
+
+        pub(super) struct AsyncTransport(pub TcpStream);
+
+        impl embedded_io_async::ErrorType for AsyncTransport {
+            type Error = embedded_io_async::ErrorKind;
+        }
+
+        impl embedded_io_async::Read for AsyncTransport {
+            async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                use tokio::io::AsyncReadExt;
+                self.0
+                    .read(buf)
+                    .await
+                    .map_err(|_| embedded_io_async::ErrorKind::Other)
+            }
+        }
+
+        impl embedded_io_async::Write for AsyncTransport {
+            async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+                use tokio::io::AsyncWriteExt;
+                self.0
+                    .write(buf)
+                    .await
+                    .map_err(|_| embedded_io_async::ErrorKind::Other)
+            }
+
+            async fn flush(&mut self) -> Result<(), Self::Error> {
+                use tokio::io::AsyncWriteExt;
+                self.0
+                    .flush()
+                    .await
+                    .map_err(|_| embedded_io_async::ErrorKind::Other)
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "async", feature = "std"))]
+    async fn async_pyzmq_sub_receives_single_publish() {
+        use mzmq::io::r#async::Driver;
+        use std::time::Instant;
+        use tokio_helpers::AsyncTransport;
+
+        let (_guard, port, mut reader) = spawn_sub_listener("");
+
+        let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .expect("failed to connect to Python SUB");
+
+        let transport = AsyncTransport(stream);
+
+        let mut driver = match Driver::<8, 32, 512, _>::new(transport).await {
+            Ok(d) => d,
+            Err(e) => panic!("Driver creation failed: {e:?}"),
+        };
+
+        // Handshake with deadline
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut established = false;
+        while Instant::now() < deadline {
+            match driver.poll().await {
+                Ok(true) => {
+                    established = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(established, "Handshake should complete within 5s");
+
+        let topic = b"test";
+        let payload = b"hello world";
+
+        // Publish with retry
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut wrote = 0;
+        while Instant::now() < deadline {
+            let _ = driver.poll().await;
+            match driver.publish(topic, payload).await {
+                Ok(0) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Ok(n) => {
+                    wrote = n;
+                    break;
+                }
+                Err(e) => panic!("publish error: {e:?}"),
+            }
+        }
+        assert!(wrote > 0, "Should eventually publish once peer subscribes");
+
+        // Read back from Python SUB
+        let timeout = Duration::from_secs(2);
+        let start = Instant::now();
+        let mut line = String::new();
+
+        while start.elapsed() < timeout {
+            if reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                println!("Received: {}", line.trim());
+
+                let parts: Vec<&str> = line.trim().split(':').collect();
+                assert_eq!(parts.len(), 2, "Expected format: hex(topic):hex(payload)");
+
+                let received_topic = hex::decode(parts[0]).expect("topic should be valid hex");
+                let received_payload = hex::decode(parts[1]).expect("payload should be valid hex");
+
+                assert_eq!(received_topic, topic.as_ref(), "Topic should match");
+                assert_eq!(received_payload, payload.as_ref(), "Payload should match");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("No message received from Python SUB within timeout");
+    }
 }
 
 #[test]
