@@ -1,13 +1,6 @@
-//! Synchronous (blocking) IO adapter for `Connection`.
-//!
-//! `Driver` wraps a `Connection` and a transport implementing
-//! `embedded_io::Read + Write`, drives the handshake, and exposes a
-//! `publish` method.
-
 use crate::auth::AuthCheck;
-use crate::connection::{ConnError, Connection, State};
-#[cfg(feature = "plain")]
-use crate::plain::WELCOME_LEN;
+use crate::connection::{ConnError, Connection};
+use crate::io::core::{Action, DriverCore, RadioDriverCore};
 use embedded_io::{Error, Read, Write};
 
 /// Blocking driver for a ZMTP 3.1 PUB [`Connection`].
@@ -28,10 +21,8 @@ pub struct Driver<
     T,
     A: AuthCheck = (),
 > {
-    conn: Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>,
+    core: DriverCore<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>,
     transport: T,
-    rx_buf: [u8; 512],
-    rx_len: usize,
 }
 
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T>
@@ -54,10 +45,8 @@ where
             .map_err(|e| ConnError::IoError(e.kind() as usize))?;
 
         Ok(Self {
-            conn,
+            core: DriverCore::new_null(conn),
             transport,
-            rx_buf: [0u8; 512],
-            rx_len: 0,
         })
     }
 }
@@ -72,7 +61,8 @@ where
     /// Create a new PLAIN-mechanism driver (server role). Sends our greeting immediately.
     ///
     /// `auth` must implement [`crate::plain::Authenticator`]. For the NULL mechanism use
-    /// [`Driver::new`] instead — `()` satisfies [`AuthCheck`] but not [`crate::plain::Authenticator`].
+    /// [`Driver::new`] instead — `()` satisfies [`AuthCheck`] but not
+    /// [`crate::plain::Authenticator`].
     ///
     /// # Errors
     /// Returns `ConnError::WrongState` if the connection cannot write the greeting.
@@ -87,10 +77,8 @@ where
             .map_err(|e| ConnError::IoError(e.kind() as usize))?;
 
         Ok(Self {
-            conn,
+            core: DriverCore::new_plain(conn),
             transport,
-            rx_buf: [0u8; 512],
-            rx_len: 0,
         })
     }
 }
@@ -109,105 +97,23 @@ where
     /// Returns `ConnError::WrongState` if the connection is in an invalid state.
     /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub fn poll(&mut self) -> Result<bool, ConnError> {
-        if *self.conn.state() == State::Ready {
-            let mut ready = [0u8; 32];
-            match self.conn.write_ready(&mut ready) {
-                Ok(n) => {
-                    self.transport
-                        .write_all(&ready[..n])
-                        .map_err(|e| ConnError::IoError(e.kind() as usize))?;
-                    // Don't process peer's READY in the same poll — defer to
-                    // the next call so our READY is on the wire first
-                    // (NULL mechanism deadlock rule).
-                    return Ok(false);
-                }
-                Err(ConnError::WrongState) => {}
-                Err(e) => return Err(e),
-            }
-        }
-
-        if self.rx_len > 0 {
-            let prev_rx_len = self.rx_len;
-            self.drain_buffer()?;
-            if self.rx_len < prev_rx_len {
-                return Ok(*self.conn.state() == State::Established);
-            }
-            // Nothing consumed — the parser needs more bytes; fall through to read.
-        }
-
-        match self.transport.read(&mut self.rx_buf[self.rx_len..]) {
-            Ok(0) => Err(ConnError::IoError(0)),
-            Ok(n) => {
-                self.rx_len += n;
-                self.drain_buffer()?;
-                Ok(*self.conn.state() == State::Established)
-            }
-            Err(e) => Err(ConnError::IoError(e.kind() as usize)),
-        }
-    }
-
-    fn drain_buffer(&mut self) -> Result<(), ConnError> {
         let io_err =
             |e: <T as embedded_io::ErrorType>::Error| ConnError::IoError(e.kind() as usize);
-        let mut total_consumed = 0;
-        while total_consumed < self.rx_len {
-            let prev_state = *self.conn.state();
-            match self.conn.feed(&self.rx_buf[total_consumed..self.rx_len]) {
-                Ok(consumed) => {
-                    total_consumed += consumed;
-
-                    if self.conn.greeting_rest_pending() {
-                        let mut rest = [0u8; 64];
-                        let n = self.conn.write_greeting_rest(&mut rest)?;
-                        self.transport.write_all(&rest[..n]).map_err(io_err)?;
+        loop {
+            match self.core.step()? {
+                Action::Write(bytes) => self.transport.write_all(bytes).map_err(io_err)?,
+                Action::Read => {
+                    let n = self.transport.read(self.core.rx_slot()).map_err(io_err)?;
+                    if n == 0 {
+                        return Err(ConnError::IoError(0));
                     }
-
-                    match (prev_state, self.conn.state()) {
-                        (State::Greeting, State::Ready) => {
-                            let mut ready = [0u8; 32];
-                            let n = self.conn.write_ready(&mut ready)?;
-                            self.transport.write_all(&ready[..n]).map_err(io_err)?;
-                            break;
-                        }
-                        #[cfg(feature = "plain")]
-                        (State::PlainHello, State::PlainReady) => {
-                            let mut welcome = [0u8; WELCOME_LEN];
-                            let n = self.conn.write_welcome(&mut welcome)?;
-                            self.transport.write_all(&welcome[..n]).map_err(io_err)?;
-                            let mut ready = [0u8; 32];
-                            let n = self.conn.write_ready(&mut ready)?;
-                            self.transport.write_all(&ready[..n]).map_err(io_err)?;
-                            break;
-                        }
-                        _ => {}
-                    }
-
-                    let mut pong_buf = [0u8; 23];
-                    if let Some(n) = self.conn.write_pong(&mut pong_buf)? {
-                        self.transport.write_all(&pong_buf[..n]).map_err(io_err)?;
-                    }
-
-                    if consumed == 0 {
-                        break;
-                    }
+                    self.core.advance_rx(n);
+                    return Ok(self.core.is_established());
                 }
-                Err(e) => {
-                    if *self.conn.state() == State::Failed {
-                        let mut err_buf = [0u8; 32];
-                        if let Ok(n) = self.conn.write_error(&mut err_buf) {
-                            let _ = self.transport.write_all(&err_buf[..n]);
-                        }
-                    }
-                    return Err(e);
-                }
+                Action::Parked => return Ok(false),
+                Action::Established => return Ok(true),
             }
         }
-
-        if total_consumed > 0 {
-            self.rx_buf.copy_within(total_consumed..self.rx_len, 0);
-            self.rx_len -= total_consumed;
-        }
-        Ok(())
     }
 
     /// Publish a message. Returns 0 if no peer subscription matches.
@@ -217,7 +123,7 @@ where
     /// Returns `ConnError::IoError` if the transport write fails.
     /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub fn publish(&mut self, topic: &[u8], payload: &[u8]) -> Result<usize, ConnError> {
-        let Some((th, th_n, ph, ph_n)) = self.conn.publish_headers(topic, payload)? else {
+        let Some((th, th_n, ph, ph_n)) = self.core.publish_headers(topic, payload)? else {
             return Ok(0);
         };
         let io_err =
@@ -233,6 +139,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::State;
     use crate::test_helpers::{
         pub_ready, sub_greeting, sub_ready, sub_subscribe,
         sync_mock::{ChunkedReadTransport, MockTransport, WriteFailTransport},
@@ -309,7 +216,7 @@ mod tests {
         }
 
         assert!(established);
-        assert_eq!(*driver.conn.state(), State::Established);
+        assert_eq!(*driver.core.conn().state(), State::Established);
 
         let written = driver.transport.written();
         assert!(written.len() >= 64 + 27);
@@ -326,8 +233,7 @@ mod tests {
     fn driver_publish_writes_correct_wire_bytes() {
         let mut driver = make_established(Some(b"foo"));
         let n = driver.publish(b"foo", b"bar").unwrap();
-        assert_eq!(n, 10); // 2+3+2+3
-        // greeting (64) + pub_ready (27) = 91 bytes before publish output
+        assert_eq!(n, 10);
         let pub_out = &driver.transport.written()[91..];
         assert_eq!(
             pub_out,
@@ -357,7 +263,6 @@ mod tests {
 
     #[test]
     fn driver_ping_triggers_pong_response() {
-        // PING: flags=0x04, body=9, name-size=4, "PING", ttl=0x00,0x00, ctx=b"hi"
         let ping = [
             0x04u8, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
         ];
@@ -370,19 +275,17 @@ mod tests {
         let mut driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
         while !driver.poll().unwrap() {}
 
-        // partial(11) + rest(53) + pub_ready(27) = 91 bytes, then PONG(9)
         let written = driver.transport.written();
         assert!(written.len() >= 100);
         let pong_frame = &written[91..100];
-        assert_eq!(pong_frame[0], 0x04); // COMMAND
-        assert_eq!(pong_frame[1], 7); // body len = 1+4+2
+        assert_eq!(pong_frame[0], 0x04);
+        assert_eq!(pong_frame[1], 7);
         assert_eq!(&pong_frame[2..7], &[0x04, b'P', b'O', b'N', b'G']);
         assert_eq!(&pong_frame[7..9], b"hi");
     }
 
     #[test]
     fn driver_feed_error_writes_error_frame_and_returns_err() {
-        // PUSH READY: wrong socket type for a PUB connection
         let push_ready = [
             0x04u8, 0x1A, 0x05, b'R', b'E', b'A', b'D', b'Y', 0x0B, b'S', b'o', b'c', b'k', b'e',
             b't', b'-', b'T', b'y', b'p', b'e', 0x00, 0x00, 0x00, 0x04, b'P', b'U', b'S', b'H',
@@ -393,13 +296,12 @@ mod tests {
 
         let transport = MockTransport::new(peer);
         let mut driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
-        assert!(!driver.poll().unwrap()); // processes greeting
-        assert!(driver.poll().is_err()); // PUSH READY → WrongSocketType → Failed
+        assert!(!driver.poll().unwrap());
+        assert!(driver.poll().is_err());
 
-        // ERROR command frame written after partial(11)+rest(53)+ready(27)=91 bytes
         let written = driver.transport.written();
         assert!(written.len() > 91);
-        assert_eq!(written[91], 0x04); // COMMAND flag
+        assert_eq!(written[91], 0x04);
     }
 
     #[test]
@@ -411,7 +313,7 @@ mod tests {
         let mut driver =
             Driver::<8, 32, 512, _>::new(ChunkedReadTransport::new(peer_bytes)).unwrap();
         while !driver.poll().unwrap() {}
-        assert_eq!(*driver.conn.state(), State::Established);
+        assert_eq!(*driver.core.conn().state(), State::Established);
     }
 
     #[test]
@@ -443,12 +345,15 @@ mod tests {
         peer.extend_from_slice(&sub_ready());
 
         let mut driver = Driver::<8, 32, 512, _>::new(WriteFailTransport::new(peer, 1)).unwrap();
+        // First poll reads data into rx_buf, returns Ok(false)
+        assert!(driver.poll().is_ok());
+        // Second poll tries to write greeting_rest, fails
         assert!(matches!(driver.poll(), Err(ConnError::IoError(_))));
     }
 }
 
 // ---------------------------------------------------------------------------
-// RADIO driver (parallel to the PUB Driver above)
+// RADIO driver
 // ---------------------------------------------------------------------------
 
 /// Blocking driver for a ZMTP 3.1 RADIO [`crate::radio_connection::RadioConnection`].
@@ -464,10 +369,8 @@ pub struct RadioDriver<
     const FRAME_CAP: usize,
     T,
 > {
-    conn: crate::radio_connection::RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP>,
+    core: RadioDriverCore<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP>,
     transport: T,
-    rx_buf: [u8; 512],
-    rx_len: usize,
 }
 
 impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize, T>
@@ -490,10 +393,8 @@ where
             .map_err(|e| crate::radio_connection::ConnError::IoError(e.kind() as usize))?;
 
         Ok(Self {
-            conn,
+            core: RadioDriverCore::new(conn),
             transport,
-            rx_buf: [0u8; 512],
-            rx_len: 0,
         })
     }
 
@@ -506,107 +407,24 @@ where
     /// Returns `ConnError::WrongState` if the connection is in an invalid state.
     /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub fn poll(&mut self) -> Result<bool, crate::radio_connection::ConnError> {
-        use crate::radio_connection::State;
-
-        if *self.conn.state() == State::Ready {
-            let mut ready = [0u8; 32];
-            match self.conn.write_ready(&mut ready) {
-                Ok(n) => {
-                    self.transport.write_all(&ready[..n]).map_err(|e| {
-                        crate::radio_connection::ConnError::IoError(e.kind() as usize)
-                    })?;
-                    return Ok(false);
+        let io_err = |e: <T as embedded_io::ErrorType>::Error| {
+            crate::radio_connection::ConnError::IoError(e.kind() as usize)
+        };
+        loop {
+            match self.core.step()? {
+                Action::Write(bytes) => self.transport.write_all(bytes).map_err(io_err)?,
+                Action::Read => {
+                    let n = self.transport.read(self.core.rx_slot()).map_err(io_err)?;
+                    if n == 0 {
+                        return Err(crate::radio_connection::ConnError::IoError(0));
+                    }
+                    self.core.advance_rx(n);
+                    return Ok(self.core.is_established());
                 }
-                Err(crate::radio_connection::ConnError::WrongState) => {}
-                Err(e) => return Err(e),
+                Action::Parked => return Ok(false),
+                Action::Established => return Ok(true),
             }
         }
-
-        if self.rx_len > 0 {
-            let prev_rx_len = self.rx_len;
-            self.drain_buffer()?;
-            if self.rx_len < prev_rx_len {
-                return Ok(*self.conn.state() == State::Established);
-            }
-            // Nothing consumed — the parser needs more bytes; fall through to read.
-        }
-
-        match self.transport.read(&mut self.rx_buf[self.rx_len..]) {
-            Ok(0) => Err(crate::radio_connection::ConnError::IoError(0)),
-            Ok(n) => {
-                self.rx_len += n;
-                self.drain_buffer()?;
-                Ok(*self.conn.state() == State::Established)
-            }
-            Err(e) => Err(crate::radio_connection::ConnError::IoError(
-                e.kind() as usize
-            )),
-        }
-    }
-
-    fn drain_buffer(&mut self) -> Result<(), crate::radio_connection::ConnError> {
-        use crate::radio_connection::State;
-
-        let mut total_consumed = 0;
-        while total_consumed < self.rx_len {
-            let was_ready_before = *self.conn.state() == State::Ready;
-            match self.conn.feed(&self.rx_buf[total_consumed..self.rx_len]) {
-                Ok(consumed) => {
-                    total_consumed += consumed;
-
-                    if self.conn.greeting_rest_pending() {
-                        let mut rest = [0u8; 64];
-                        match self.conn.write_greeting_rest(&mut rest) {
-                            Ok(n) => {
-                                self.transport.write_all(&rest[..n]).map_err(|e| {
-                                    crate::radio_connection::ConnError::IoError(e.kind() as usize)
-                                })?;
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-
-                    if *self.conn.state() == State::Ready && !was_ready_before {
-                        let mut ready = [0u8; 32];
-                        match self.conn.write_ready(&mut ready) {
-                            Ok(n) => {
-                                self.transport.write_all(&ready[..n]).map_err(|e| {
-                                    crate::radio_connection::ConnError::IoError(e.kind() as usize)
-                                })?;
-                                break;
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-
-                    let mut pong_buf = [0u8; 23];
-                    if let Some(n) = self.conn.write_pong(&mut pong_buf)? {
-                        self.transport.write_all(&pong_buf[..n]).map_err(|e| {
-                            crate::radio_connection::ConnError::IoError(e.kind() as usize)
-                        })?;
-                    }
-
-                    if consumed == 0 {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    if *self.conn.state() == State::Failed {
-                        let mut err_buf = [0u8; 32];
-                        if let Ok(n) = self.conn.write_error(&mut err_buf) {
-                            let _ = self.transport.write_all(&err_buf[..n]);
-                        }
-                    }
-                    return Err(e);
-                }
-            }
-        }
-
-        if total_consumed > 0 {
-            self.rx_buf.copy_within(total_consumed..self.rx_len, 0);
-            self.rx_len -= total_consumed;
-        }
-        Ok(())
     }
 
     /// Publish a message to the group. Returns 0 if the peer has not joined the group.
@@ -620,7 +438,7 @@ where
         group: &[u8],
         body: &[u8],
     ) -> Result<usize, crate::radio_connection::ConnError> {
-        let Some((gh, gh_n, bh, bh_n)) = self.conn.publish_headers(group, body)? else {
+        let Some((gh, gh_n, bh, bh_n)) = self.core.publish_headers(group, body)? else {
             return Ok(0);
         };
         let io_err = |e: <T as embedded_io::ErrorType>::Error| {
@@ -714,7 +532,7 @@ mod radio_tests {
 
         assert!(established);
         assert_eq!(
-            *driver.conn.state(),
+            *driver.core.conn().state(),
             crate::radio_connection::State::Established
         );
 
@@ -733,8 +551,7 @@ mod radio_tests {
     fn radio_driver_publish_writes_correct_wire_bytes() {
         let mut driver = make_established(Some(b"foo"));
         let n = driver.publish(b"foo", b"bar").unwrap();
-        assert_eq!(n, 10); // 2+3+2+3
-        // greeting (64) + radio_ready (29) = 93 bytes before publish output
+        assert_eq!(n, 10);
         let pub_out = &driver.transport.written()[93..];
         assert_eq!(
             pub_out,
@@ -764,7 +581,6 @@ mod radio_tests {
 
     #[test]
     fn radio_driver_ping_triggers_pong_response() {
-        // PING: flags=0x04, body=9, name-size=4, "PING", ttl=0x00,0x00, ctx=b"hi"
         let ping = [
             0x04u8, 0x09, 0x04, b'P', b'I', b'N', b'G', 0x00, 0x00, b'h', b'i',
         ];
@@ -777,32 +593,29 @@ mod radio_tests {
         let mut driver = RadioDriver::<8, 32, 512, _>::new(transport).unwrap();
         while !driver.poll().unwrap() {}
 
-        // partial(11) + rest(53) + radio_ready(29) = 93 bytes, then PONG(9)
         let written = driver.transport.written();
         assert!(written.len() >= 102);
         let pong_frame = &written[93..102];
-        assert_eq!(pong_frame[0], 0x04); // COMMAND
-        assert_eq!(pong_frame[1], 7); // body len = 1+4+2
+        assert_eq!(pong_frame[0], 0x04);
+        assert_eq!(pong_frame[1], 7);
         assert_eq!(&pong_frame[2..7], &[0x04, b'P', b'O', b'N', b'G']);
         assert_eq!(&pong_frame[7..9], b"hi");
     }
 
     #[test]
     fn radio_driver_feed_error_writes_error_frame_and_returns_err() {
-        // SUB READY: wrong socket type for a RADIO connection (expects DISH)
         let mut peer = alloc::vec::Vec::new();
         peer.extend_from_slice(&dish_greeting());
         peer.extend_from_slice(&crate::test_helpers::sub_ready());
 
         let transport = MockTransport::new(peer);
         let mut driver = RadioDriver::<8, 32, 512, _>::new(transport).unwrap();
-        assert!(!driver.poll().unwrap()); // processes greeting
-        assert!(driver.poll().is_err()); // SUB READY → WrongSocketType → Failed
+        assert!(!driver.poll().unwrap());
+        assert!(driver.poll().is_err());
 
-        // ERROR command frame written after partial(11)+rest(53)+radio_ready(29)=93 bytes
         let written = driver.transport.written();
         assert!(written.len() > 93);
-        assert_eq!(written[93], 0x04); // COMMAND flag
+        assert_eq!(written[93], 0x04);
     }
 
     #[test]
@@ -815,7 +628,7 @@ mod radio_tests {
             RadioDriver::<8, 32, 512, _>::new(ChunkedReadTransport::new(peer_bytes)).unwrap();
         while !driver.poll().unwrap() {}
         assert_eq!(
-            *driver.conn.state(),
+            *driver.core.conn().state(),
             crate::radio_connection::State::Established
         );
     }
@@ -851,6 +664,9 @@ mod radio_tests {
 
         let mut driver =
             RadioDriver::<8, 32, 512, _>::new(WriteFailTransport::new(peer, 1)).unwrap();
+        // First poll reads data into rx_buf, returns Ok(false)
+        assert!(driver.poll().is_ok());
+        // Second poll tries to write greeting_rest, fails
         assert!(driver.poll().is_err());
     }
 }
@@ -858,6 +674,7 @@ mod radio_tests {
 #[cfg(all(test, feature = "plain"))]
 mod plain_driver_tests {
     use super::*;
+    use crate::connection::State;
     use crate::test_helpers::{
         plain_hello, plain_sub_greeting, pub_ready, sub_ready, sub_subscribe,
         sync_mock::{ChunkedReadTransport, MockTransport, WriteFailTransport},
@@ -915,25 +732,20 @@ mod plain_driver_tests {
     #[test]
     fn plain_driver_completes_handshake() {
         let driver = make_plain_established(None);
-        assert_eq!(*driver.conn.state(), State::Established);
+        assert_eq!(*driver.core.conn().state(), State::Established);
     }
 
     #[test]
     fn plain_driver_emits_welcome_then_ready() {
         let driver = make_plain_established(None);
         let written = driver.transport.written();
-        // partial(11) + rest(53) = 64 bytes (our PLAIN server greeting)
-        // welcome(10) at offset 64, pub_ready(27) at offset 74
         assert!(written.len() >= 101);
-        // PLAIN server greeting: mechanism="PLAIN" at bytes 12–16, as_server=1 at byte 32
         assert_eq!(&written[12..17], b"PLAIN");
         assert_eq!(written[32], 0x01);
-        // WELCOME frame
         assert_eq!(written[64], 0x04);
         assert_eq!(written[65], 0x08);
         assert_eq!(written[66], 0x07);
         assert_eq!(&written[67..74], b"WELCOME");
-        // PUB READY frame
         assert_eq!(&written[74..101], &pub_ready());
     }
 
@@ -947,8 +759,7 @@ mod plain_driver_tests {
     fn plain_driver_publish_writes_correct_wire_bytes() {
         let mut driver = make_plain_established(Some(b"foo"));
         let n = driver.publish(b"foo", b"bar").unwrap();
-        assert_eq!(n, 10); // 2+3+2+3
-        // greeting(64) + welcome(10) + pub_ready(27) = 101 bytes before publish
+        assert_eq!(n, 10);
         let pub_out = &driver.transport.written()[101..];
         assert_eq!(
             pub_out,

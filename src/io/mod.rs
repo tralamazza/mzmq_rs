@@ -3,8 +3,12 @@
 //! - `sync`: blocking drivers over `embedded_io::Read + Write`
 //! - `async`: future-based drivers over `embedded_io_async::Read + Write`
 
+pub(crate) mod core;
+
+/// Synchronous (blocking) IO adapter for `Connection` and `RadioConnection`.
 #[cfg(feature = "sync")]
 pub mod sync;
 
+/// Asynchronous IO adapter for `Connection` and `RadioConnection`.
 #[cfg(feature = "async")]
 pub mod r#async;

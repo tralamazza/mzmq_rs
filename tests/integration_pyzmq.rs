@@ -186,26 +186,39 @@ mod python_tests {
     mod tokio_helpers {
         use tokio::net::TcpStream;
 
-        pub(super) struct AsyncTransport(pub TcpStream);
-
-        impl embedded_io_async::ErrorType for AsyncTransport {
-            type Error = embedded_io_async::ErrorKind;
+        /// Wraps a [`TcpStream`] and enforces a per-read timeout using
+        /// [`tokio::time::timeout`].  On timeout the read returns
+        /// `ErrorKind::Other` so caller loops can retry — mirroring the
+        /// sync test's `set_read_timeout` behaviour.
+        pub(super) struct TimedAsyncTransport {
+            inner: TcpStream,
+            timeout: std::time::Duration,
         }
 
-        impl embedded_io_async::Read for AsyncTransport {
-            async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                use tokio::io::AsyncReadExt;
-                self.0
-                    .read(buf)
-                    .await
-                    .map_err(|_| embedded_io_async::ErrorKind::Other)
+        impl TimedAsyncTransport {
+            pub(super) fn new(inner: TcpStream, timeout: std::time::Duration) -> Self {
+                Self { inner, timeout }
             }
         }
 
-        impl embedded_io_async::Write for AsyncTransport {
+        impl embedded_io_async::ErrorType for TimedAsyncTransport {
+            type Error = embedded_io_async::ErrorKind;
+        }
+
+        impl embedded_io_async::Read for TimedAsyncTransport {
+            async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                use tokio::io::AsyncReadExt;
+                tokio::time::timeout(self.timeout, self.inner.read(buf))
+                    .await
+                    .map_err(|_elapsed| embedded_io_async::ErrorKind::Other)?
+                    .map_err(|_io| embedded_io_async::ErrorKind::Other)
+            }
+        }
+
+        impl embedded_io_async::Write for TimedAsyncTransport {
             async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
                 use tokio::io::AsyncWriteExt;
-                self.0
+                self.inner
                     .write(buf)
                     .await
                     .map_err(|_| embedded_io_async::ErrorKind::Other)
@@ -213,7 +226,7 @@ mod python_tests {
 
             async fn flush(&mut self) -> Result<(), Self::Error> {
                 use tokio::io::AsyncWriteExt;
-                self.0
+                self.inner
                     .flush()
                     .await
                     .map_err(|_| embedded_io_async::ErrorKind::Other)
@@ -225,7 +238,7 @@ mod python_tests {
     #[cfg(all(feature = "async", feature = "std"))]
     async fn async_pyzmq_sub_receives_single_publish() {
         use mzmq::io::r#async::Driver;
-        use tokio_helpers::AsyncTransport;
+        use tokio_helpers::TimedAsyncTransport;
 
         let (_guard, port, rx) = spawn_sub_listener("");
 
@@ -233,7 +246,7 @@ mod python_tests {
             .await
             .expect("failed to connect to Python SUB");
 
-        let transport = AsyncTransport(stream);
+        let transport = TimedAsyncTransport::new(stream, Duration::from_millis(200));
 
         let mut driver = match Driver::<8, 32, 512, _>::new(transport).await {
             Ok(d) => d,
