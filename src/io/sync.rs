@@ -179,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_sends_partial_greeting_first() {
+    fn driver_sends_full_greeting_first() {
         let mut peer_bytes = alloc::vec::Vec::new();
         peer_bytes.extend_from_slice(&sub_greeting());
         peer_bytes.extend_from_slice(&sub_ready());
@@ -188,7 +188,7 @@ mod tests {
         let driver = Driver::<8, 32, 512, _>::new(transport).unwrap();
 
         let written = driver.transport.written();
-        assert_eq!(written.len(), 11);
+        assert_eq!(written.len(), 64);
         assert_eq!(written[0], 0xFF);
         assert_eq!(written[9], 0x7F);
         assert_eq!(written[10], 0x03);
@@ -494,7 +494,7 @@ mod radio_tests {
     }
 
     #[test]
-    fn radio_driver_sends_partial_greeting_first() {
+    fn radio_driver_sends_full_greeting_first() {
         let mut peer_bytes = alloc::vec::Vec::new();
         peer_bytes.extend_from_slice(&dish_greeting());
         peer_bytes.extend_from_slice(&dish_ready());
@@ -503,7 +503,7 @@ mod radio_tests {
         let driver = RadioDriver::<8, 32, 512, _>::new(transport).unwrap();
 
         let written = driver.transport.written();
-        assert_eq!(written.len(), 11);
+        assert_eq!(written.len(), 64);
         assert_eq!(written[0], 0xFF);
         assert_eq!(written[9], 0x7F);
         assert_eq!(written[10], 0x03);
@@ -713,7 +713,7 @@ mod plain_driver_tests {
     }
 
     #[test]
-    fn plain_driver_writes_partial_greeting_on_construction() {
+    fn plain_driver_writes_full_greeting_on_construction() {
         let mut peer = alloc::vec::Vec::new();
         peer.extend_from_slice(&plain_sub_greeting());
         peer.extend_from_slice(&plain_hello(b"u", b"p"));
@@ -723,7 +723,7 @@ mod plain_driver_tests {
             Driver::<8, 32, 512, _, _>::new_plain(MockTransport::new(peer), AcceptAll).unwrap();
 
         let written = driver.transport.written();
-        assert_eq!(written.len(), 11);
+        assert_eq!(written.len(), 64);
         assert_eq!(written[0], 0xFF);
         assert_eq!(written[9], 0x7F);
         assert_eq!(written[10], 0x03);

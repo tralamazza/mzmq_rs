@@ -8,7 +8,6 @@ use crate::radio_connection::{self, RadioConnection};
 
 pub(super) enum DriverPhase {
     AwaitingPeerGreeting,
-    SendingGreetingRest,
     SendingReady,
     AwaitingPeerReady,
     #[cfg(feature = "plain")]
@@ -118,10 +117,6 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
             // corresponding "Awaiting" phase so the next step continues
             // processing buffered rx data.
             match self.phase {
-                DriverPhase::SendingGreetingRest => {
-                    self.phase = DriverPhase::AwaitingPeerGreeting;
-                    continue;
-                }
                 DriverPhase::SendingReady => {
                     self.phase = DriverPhase::AwaitingPeerReady;
                     continue;
@@ -167,6 +162,12 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
                     if self.tx_len > 0 {
                         continue;
                     }
+                    if *self.conn.state() == connection::State::Ready {
+                        let n = self.conn.write_ready(&mut self.tx_buf)?;
+                        self.tx_len = n;
+                        self.phase = DriverPhase::SendingReady;
+                        continue;
+                    }
                     if self.rx_len > 0 {
                         return Ok(Action::Parked);
                     }
@@ -184,6 +185,10 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
                     self.shift_rx(consumed);
                     if self.tx_len > 0 {
                         continue;
+                    }
+                    if *self.conn.state() == connection::State::Established {
+                        self.phase = DriverPhase::Established;
+                        return Ok(Action::Established);
                     }
                     if *self.conn.state() == connection::State::Established {
                         self.phase = DriverPhase::Established;
@@ -246,9 +251,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
                     }
                     return Ok(Action::Read);
                 }
-                DriverPhase::Failed
-                | DriverPhase::SendingGreetingRest
-                | DriverPhase::SendingReady => unreachable!(),
+                DriverPhase::Failed | DriverPhase::SendingReady => unreachable!(),
                 #[cfg(feature = "plain")]
                 DriverPhase::SendingPlainWelcome | DriverPhase::SendingPlainReady => unreachable!(),
             }
@@ -267,10 +270,7 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
                     }
                     total_consumed += consumed;
 
-                    if self.conn.greeting_rest_pending() {
-                        let n = self.conn.write_greeting_rest(&mut self.tx_buf)?;
-                        self.tx_len = n;
-                        self.phase = DriverPhase::SendingGreetingRest;
+                    if *self.conn.state() == connection::State::Ready {
                         break;
                     }
 
@@ -334,7 +334,6 @@ impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, A: A
 
 pub(super) enum RadioDriverPhase {
     AwaitingPeerGreeting,
-    SendingGreetingRest,
     SendingReady,
     AwaitingPeerReady,
     Established,
@@ -404,10 +403,6 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
             }
 
             match self.phase {
-                RadioDriverPhase::SendingGreetingRest => {
-                    self.phase = RadioDriverPhase::AwaitingPeerGreeting;
-                    continue;
-                }
                 RadioDriverPhase::SendingReady => {
                     self.phase = RadioDriverPhase::AwaitingPeerReady;
                     continue;
@@ -438,6 +433,12 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
                     self.shift_rx(total_consumed);
 
                     if self.tx_len > 0 {
+                        continue;
+                    }
+                    if *self.conn.state() == radio_connection::State::Ready {
+                        let n = self.conn.write_ready(&mut self.tx_buf)?;
+                        self.tx_len = n;
+                        self.phase = RadioDriverPhase::SendingReady;
                         continue;
                     }
                     if self.rx_len > 0 {
@@ -485,9 +486,7 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
                     }
                     return Ok(Action::Read);
                 }
-                RadioDriverPhase::Failed
-                | RadioDriverPhase::SendingGreetingRest
-                | RadioDriverPhase::SendingReady => {
+                RadioDriverPhase::Failed | RadioDriverPhase::SendingReady => {
                     unreachable!()
                 }
             }
@@ -498,7 +497,6 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
         use radio_connection::State;
         let mut total_consumed = 0;
         while total_consumed < self.rx_len {
-            let was_ready_before = *self.conn.state() == State::Ready;
             match self.conn.feed(&self.rx_buf[total_consumed..self.rx_len]) {
                 Ok(consumed) => {
                     if consumed == 0 {
@@ -506,17 +504,7 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
                     }
                     total_consumed += consumed;
 
-                    if self.conn.greeting_rest_pending() {
-                        let n = self.conn.write_greeting_rest(&mut self.tx_buf)?;
-                        self.tx_len = n;
-                        self.phase = RadioDriverPhase::SendingGreetingRest;
-                        break;
-                    }
-
-                    if *self.conn.state() == State::Ready && !was_ready_before {
-                        let n = self.conn.write_ready(&mut self.tx_buf)?;
-                        self.tx_len = n;
-                        self.phase = RadioDriverPhase::SendingReady;
+                    if *self.conn.state() == radio_connection::State::Ready {
                         break;
                     }
 
@@ -590,13 +578,6 @@ mod core_tests {
 
         match core.step() {
             Ok(Action::Write(bytes)) => {
-                assert_eq!(bytes.len(), 53);
-            }
-            other => panic!("expected Write(greeting_rest), got {other:?}"),
-        }
-
-        match core.step() {
-            Ok(Action::Write(bytes)) => {
                 assert_eq!(bytes[0], 0x04);
                 assert_eq!(&bytes[3..8], b"READY");
             }
@@ -616,7 +597,6 @@ mod core_tests {
         let mut core = make_core();
 
         feed_all(&mut core, &sub_greeting());
-        assert!(matches!(core.step(), Ok(Action::Write(_)))); // greeting_rest
         assert!(matches!(core.step(), Ok(Action::Write(_)))); // READY
 
         let push_ready = [
@@ -646,14 +626,6 @@ mod core_tests {
         feed_all(&mut core, &sub_greeting()[11..]);
         feed_all(&mut core, &sub_ready());
 
-        // Process greeting_rest
-        match core.step() {
-            Ok(Action::Write(bytes)) => {
-                assert_eq!(bytes.len(), 53);
-            }
-            other => panic!("expected Write(53), got {other:?}"),
-        }
-
         // Write READY
         match core.step() {
             Ok(Action::Write(bytes)) => {
@@ -681,7 +653,6 @@ mod core_tests {
         peer.extend_from_slice(&sub_subscribe(b"foo"));
         feed_all(&mut core, &peer);
 
-        assert!(matches!(core.step(), Ok(Action::Write(_)))); // greeting_rest
         assert!(matches!(core.step(), Ok(Action::Write(_)))); // READY
         assert!(matches!(core.step(), Ok(Action::Established)));
 
