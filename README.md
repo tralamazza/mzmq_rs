@@ -98,9 +98,56 @@ let mut driver = Driver::<8, 32, 1024, _, _>::new_plain(transport, auth)?;
 |---------|:-------:|-------------|
 | `sync` | yes | Blocking driver over `embedded-io` |
 | `async` | no | Async driver over `embedded-io-async` |
+| `smoltcp` | no | Adapter for `smoltcp::socket::tcp::Socket` |
 | `std` | no | Opt out of `no_std`; required on hosted targets |
 | `plain` | no | ZMTP PLAIN security mechanism (RFC 27) — server role |
 | `python-tests` | no | Integration tests against a real `pyzmq` process |
+
+## smoltcp integration
+
+Enable the `smoltcp` feature to get a `TcpAdapter` that wraps a `smoltcp::socket::tcp::Socket` into an `embedded_io::Read + Write` transport:
+
+```toml
+[dependencies]
+mzmq = { version = "0.1", features = ["smoltcp"] }
+```
+
+Because smoltcp sockets are managed through a `SocketSet`, you must borrow the socket
+temporarily on each iteration and release it before calling `Interface::poll()`.
+Use the sans-IO `Connection` (or `RadioConnection`) directly:
+
+```rust,no_run
+use mzmq::io::smoltcp::TcpAdapter;
+use mzmq::connection::{Connection, State};
+
+let mut conn = Connection::<8, 32, 1024>::new();
+
+loop {
+    // Drive the TCP stack first
+    iface.poll(Instant::now(), &mut device, &mut sockets);
+
+    // Borrow socket for one round of ZMTP I/O
+    {
+        let socket = sockets.get_mut::<Socket>(handle);
+        let mut transport = TcpAdapter(socket);
+
+        // Read → feed → write ready/pong/publish
+        let mut buf = [0u8; 512];
+        if let Ok(n) = transport.read(&mut buf) {
+            conn.feed(&buf[..n]);
+        }
+        if let State::Ready = *conn.state() {
+            let mut ready = [0u8; 32];
+            if let Ok(n) = conn.write_ready(&mut ready) {
+                let _ = transport.write_all(&ready[..n]);
+            }
+        }
+    }
+    // Socket borrow released — safe to call iface.poll() again
+}
+```
+
+See [`examples/smoltcp_pub.rs`](examples/smoltcp_pub.rs) for a full runnable example.
 
 ## `no_std` / embedded targets
 

@@ -21,6 +21,7 @@ default = ["sync"]
 std = []
 sync = ["dep:embedded-io"]
 async = ["dep:embedded-io-async"]
+smoltcp = ["dep:smoltcp", "sync"]
 plain = []
 python-tests = []
 
@@ -28,6 +29,7 @@ python-tests = []
 heapless = "0.9"
 embedded-io = { version = "0.7", optional = true }
 embedded-io-async = { version = "0.7", optional = true }
+smoltcp = { version = "0.13", optional = true, default-features = false, features = ["socket-tcp", "proto-ipv4", "medium-ip"] }
 
 [dev-dependencies]
 assert_cmd = "2.0"
@@ -36,3 +38,4 @@ wait-timeout = "0.2"
 hex = "0.4"
 embedded-io-adapters = { version = "0.7", features = ["std"] }
 tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "net"] }
+smoltcp = { version = "0.13" }
