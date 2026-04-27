@@ -64,7 +64,6 @@ pub struct RadioConnection<
     A: AuthCheck = (),
 > {
     state: State,
-    our_greeting_partial_sent: bool,
     our_greeting_sent: bool,
     peer_greeting_received: bool,
     peer_version_minor: u8,
@@ -89,7 +88,6 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize>
     pub fn new() -> Self {
         Self {
             state: State::Greeting,
-            our_greeting_partial_sent: false,
             our_greeting_sent: false,
             peer_greeting_received: false,
             peer_version_minor: 0,
@@ -127,7 +125,6 @@ where
     pub fn new_plain(auth: A) -> Self {
         Self {
             state: State::Greeting,
-            our_greeting_partial_sent: false,
             our_greeting_sent: false,
             peer_greeting_received: false,
             peer_version_minor: 0,
@@ -159,44 +156,17 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
         (3, self.peer_version_minor)
     }
 
-    /// Write the first 11 bytes of our greeting (signature + version major) into `out`.
-    /// Call once after creating the connection.
-    /// Returns `Ok(GREETING_PARTIAL_LEN)` or Err if not in Greeting state or buf too small.
+    /// Write our full 64-byte greeting into `out`. Call once after creating the connection.
+    /// Returns `Ok(GREETING_LEN)` or Err if not in Greeting state or buf too small.
     ///
     /// # Errors
     /// Returns `ConnError::WrongState` if not in `Greeting` state or already sent.
-    /// Returns `ConnError::BufferTooSmall` if `out` is smaller than `GREETING_PARTIAL_LEN`.
+    /// Returns `ConnError::BufferTooSmall` if `out` is smaller than `GREETING_LEN`.
     pub fn write_greeting(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
-        if self.state != State::Greeting || self.our_greeting_partial_sent {
+        if self.state != State::Greeting || self.our_greeting_sent {
             return Err(ConnError::WrongState);
         }
-        if out.len() < GREETING_PARTIAL_LEN {
-            return Err(ConnError::BufferTooSmall);
-        }
-        let mut arr = [0u8; GREETING_LEN];
-        encode_greeting(&mut arr);
-        out[..GREETING_PARTIAL_LEN].copy_from_slice(&arr[..GREETING_PARTIAL_LEN]);
-        self.our_greeting_partial_sent = true;
-        Ok(GREETING_PARTIAL_LEN)
-    }
-
-    /// Write the remaining 53 bytes of our greeting into `out`.
-    /// Call after receiving the peer's partial greeting (11 bytes).
-    /// If the peer's full greeting is already received, transitions state to Ready (NULL)
-    /// or `PlainHello` (PLAIN).
-    ///
-    /// # Errors
-    /// Returns `ConnError::WrongState` if not in the correct handshake state.
-    /// Returns `ConnError::BufferTooSmall` if `out` is smaller than the remaining greeting bytes.
-    pub fn write_greeting_rest(&mut self, out: &mut [u8]) -> Result<usize, ConnError> {
-        if self.state != State::Greeting
-            || !self.our_greeting_partial_sent
-            || self.our_greeting_sent
-        {
-            return Err(ConnError::WrongState);
-        }
-        let rest_len = GREETING_LEN - GREETING_PARTIAL_LEN;
-        if out.len() < rest_len {
+        if out.len() < GREETING_LEN {
             return Err(ConnError::BufferTooSmall);
         }
         let mut arr = [0u8; GREETING_LEN];
@@ -205,26 +175,9 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
             #[cfg(feature = "plain")]
             Mechanism::Plain => encode_plain_greeting(&mut arr),
         }
-        out[..rest_len].copy_from_slice(&arr[GREETING_PARTIAL_LEN..]);
+        out[..GREETING_LEN].copy_from_slice(&arr);
         self.our_greeting_sent = true;
-        if self.peer_greeting_received {
-            self.state = match self.mechanism {
-                Mechanism::Null => State::Ready,
-                #[cfg(feature = "plain")]
-                Mechanism::Plain => State::PlainHello,
-            };
-        }
-        Ok(rest_len)
-    }
-
-    /// Returns `true` if we have sent our partial greeting, received the peer's partial greeting,
-    /// but have not yet sent the remaining 53 bytes.
-    #[must_use]
-    pub fn greeting_rest_pending(&self) -> bool {
-        self.state == State::Greeting
-            && self.our_greeting_partial_sent
-            && !self.our_greeting_sent
-            && self.greeting_pos >= GREETING_PARTIAL_LEN
+        Ok(GREETING_LEN)
     }
 
     /// Write our RADIO READY command into `out`. Call after receiving a valid peer greeting.
@@ -323,7 +276,11 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
         if !self.our_ready_sent {
             return Err(ConnError::WrongState);
         }
+        self.feed_ready_inner(input)
+    }
 
+    /// Shared logic for processing a peer READY command frame (NULL and PLAIN).
+    fn feed_ready_inner(&mut self, input: &[u8]) -> Result<usize, ConnError> {
         let (consumed, maybe_frame) = self
             .frame_decoder
             .feed(input)
@@ -528,28 +485,7 @@ impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize,
         if !self.our_welcome_sent || !self.our_ready_sent {
             return Err(ConnError::WrongState);
         }
-        let (consumed, maybe_frame) = self
-            .frame_decoder
-            .feed(input)
-            .map_err(ConnError::DecodeError)?;
-
-        if let Some(frame) = maybe_frame {
-            let body = frame.body;
-            if body.len() > 255 {
-                self.state = State::Failed;
-                return Err(ConnError::NullError(NullError::MalformedMetadata));
-            }
-            match parse_ready_radio_from(frame.is_command, body) {
-                Ok(_) => {
-                    self.state = State::Established;
-                }
-                Err(e) => {
-                    self.state = State::Failed;
-                    return Err(ConnError::NullError(e));
-                }
-            }
-        }
-        Ok(consumed)
+        self.feed_ready_inner(input)
     }
 }
 
@@ -603,7 +539,6 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&dish_greeting()).unwrap();
-        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         conn.write_ready(&mut ready_out).unwrap();
         conn.feed(&dish_ready()).unwrap();
@@ -642,17 +577,16 @@ mod tests {
         assert_eq!(conn.state(), &State::Greeting);
     }
 
-    // Test 2: write_greeting writes 11 bytes (partial greeting)
+    // Test 2: write_greeting writes 64 bytes (full greeting)
     #[test]
     fn write_greeting_succeeds() {
         let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
         let mut out = [0u8; 64];
         let n = conn.write_greeting(&mut out).unwrap();
-        assert_eq!(n, GREETING_PARTIAL_LEN);
+        assert_eq!(n, GREETING_LEN);
         assert_eq!(out[0], 0xFF);
         assert_eq!(out[9], 0x7F);
         assert_eq!(out[10], 0x03);
-        assert!(out[11..].iter().all(|&b| b == 0));
     }
 
     // Test 3: calling write_greeting twice returns WrongState
@@ -665,15 +599,13 @@ mod tests {
         assert_eq!(result, Err(ConnError::WrongState));
     }
 
-    // Test 4: feed(DISH_GREETING) after write_greeting + write_greeting_rest advances to Ready
+    // Test 4: feed(DISH_GREETING) after write_greeting advances to Ready
     #[test]
     fn feed_peer_greeting_advances_to_ready() {
         let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&dish_greeting()).unwrap();
-        assert_eq!(conn.state(), &State::Greeting);
-        conn.write_greeting_rest(&mut out).unwrap();
         assert_eq!(conn.state(), &State::Ready);
     }
 
@@ -684,7 +616,6 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&dish_greeting()).unwrap();
-        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         let n = conn.write_ready(&mut ready_out).unwrap();
         assert_eq!(n, RADIO_READY_LEN);
@@ -705,7 +636,6 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&dish_greeting()).unwrap();
-        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         conn.write_ready(&mut ready_out).unwrap();
         let result = conn.feed(&sub_ready());
@@ -827,7 +757,6 @@ mod tests {
         let mut out = [0u8; 64];
         conn.write_greeting(&mut out).unwrap();
         conn.feed(&dish_greeting()).unwrap();
-        conn.write_greeting_rest(&mut out).unwrap();
         let mut ready_out = [0u8; 32];
         conn.write_ready(&mut ready_out).unwrap();
         let _ = conn.feed(&sub_ready());
@@ -852,29 +781,7 @@ mod tests {
         assert_eq!(conn.peer_version(), (3, 1));
     }
 
-    // Test 16: write_greeting_rest writes remaining 53 bytes
-    #[test]
-    fn write_greeting_rest_succeeds() {
-        let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
-        let mut out = [0u8; 64];
-        conn.write_greeting(&mut out).unwrap();
-        let n = conn.write_greeting_rest(&mut out).unwrap();
-        assert_eq!(n, GREETING_LEN - GREETING_PARTIAL_LEN);
-        assert_eq!(out[0], 0x01); // version minor
-        assert_eq!(&out[1..5], b"NULL");
-        assert!(out[5..].iter().all(|&b| b == 0));
-    }
-
-    // Test 17: calling write_greeting_rest before write_greeting fails
-    #[test]
-    fn write_greeting_rest_before_write_greeting_fails() {
-        let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
-        let mut out = [0u8; 64];
-        let result = conn.write_greeting_rest(&mut out);
-        assert_eq!(result, Err(ConnError::WrongState));
-    }
-
-    // Test 18: calling write_greeting twice fails
+    // Test 16: calling write_greeting twice fails
     #[test]
     fn write_greeting_twice_fails() {
         let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
@@ -884,41 +791,13 @@ mod tests {
         assert_eq!(result, Err(ConnError::WrongState));
     }
 
-    // Test 19: calling write_greeting_rest twice fails
+    // Test 17: write_greeting produces the canonical 64-byte greeting
     #[test]
-    fn write_greeting_rest_twice_fails() {
-        let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
-        let mut out = [0u8; 64];
-        conn.write_greeting(&mut out).unwrap();
-        conn.write_greeting_rest(&mut out).unwrap();
-        let result = conn.write_greeting_rest(&mut out);
-        assert_eq!(result, Err(ConnError::WrongState));
-    }
-
-    // Test 20: greeting_rest_pending is true after receiving peer partial
-    #[test]
-    fn greeting_rest_pending_after_peer_partial() {
-        let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
-        let mut out = [0u8; 64];
-        conn.write_greeting(&mut out).unwrap();
-        assert!(!conn.greeting_rest_pending());
-
-        let partial = &dish_greeting()[..GREETING_PARTIAL_LEN];
-        conn.feed(partial).unwrap();
-        assert!(conn.greeting_rest_pending());
-
-        conn.write_greeting_rest(&mut out).unwrap();
-        assert!(!conn.greeting_rest_pending());
-    }
-
-    // Test 21: write_greeting + write_greeting_rest produces the canonical 64-byte greeting
-    #[test]
-    fn write_greeting_concat_matches_encode_greeting() {
+    fn write_greeting_matches_encode_greeting() {
         let mut conn: RadioConnection<8, 32, 512> = RadioConnection::new();
         let mut combined = [0u8; GREETING_LEN];
-        let n1 = conn.write_greeting(&mut combined).unwrap();
-        let n2 = conn.write_greeting_rest(&mut combined[n1..]).unwrap();
-        assert_eq!(n1 + n2, GREETING_LEN);
+        let n = conn.write_greeting(&mut combined).unwrap();
+        assert_eq!(n, GREETING_LEN);
 
         let mut expected = [0u8; GREETING_LEN];
         encode_greeting(&mut expected);
@@ -992,7 +871,6 @@ mod tests {
             let mut out = [0u8; 64];
             conn.write_greeting(&mut out).unwrap();
             conn.feed(&plain_dish_greeting()).unwrap();
-            conn.write_greeting_rest(&mut out).unwrap();
             let hello = hello_frame(b"user", b"pass");
             conn.feed(hello.as_slice()).unwrap();
             let mut welcome_buf = [0u8; 16];
@@ -1002,15 +880,14 @@ mod tests {
             conn.feed(&dish_ready()).unwrap();
         }
 
-        // Test RP1: write_greeting_rest for PLAIN encodes "PLAIN" and as_server=1
+        // Test RP1: write_greeting for PLAIN encodes "PLAIN" and as_server=1
         #[test]
-        fn plain_write_greeting_rest_uses_plain_greeting() {
+        fn plain_write_greeting_uses_plain_greeting() {
             let mut conn: RadioConnection<8, 32, 512, AcceptAll> =
                 RadioConnection::new_plain(AcceptAll);
             let mut combined = [0u8; GREETING_LEN];
-            let n1 = conn.write_greeting(&mut combined).unwrap();
-            let n2 = conn.write_greeting_rest(&mut combined[n1..]).unwrap();
-            assert_eq!(n1 + n2, GREETING_LEN);
+            let n = conn.write_greeting(&mut combined).unwrap();
+            assert_eq!(n, GREETING_LEN);
 
             let mut expected = [0u8; GREETING_LEN];
             encode_plain_greeting(&mut expected);
@@ -1025,7 +902,6 @@ mod tests {
             let mut out = [0u8; 64];
             conn.write_greeting(&mut out).unwrap();
             conn.feed(&plain_dish_greeting()).unwrap();
-            conn.write_greeting_rest(&mut out).unwrap();
             assert_eq!(conn.state(), &State::PlainHello);
         }
 
@@ -1040,7 +916,6 @@ mod tests {
             let mut out = [0u8; 64];
             conn.write_greeting(&mut out).unwrap();
             conn.feed(&plain_dish_greeting()).unwrap();
-            conn.write_greeting_rest(&mut out).unwrap();
 
             let hello = hello_frame(b"alice", b"secret");
             conn.feed(hello.as_slice()).unwrap();
@@ -1055,7 +930,6 @@ mod tests {
             let mut out = [0u8; 64];
             conn.write_greeting(&mut out).unwrap();
             conn.feed(&plain_dish_greeting()).unwrap();
-            conn.write_greeting_rest(&mut out).unwrap();
 
             let hello = hello_frame(b"user", b"wrong");
             let result = conn.feed(hello.as_slice());
@@ -1074,7 +948,6 @@ mod tests {
             let mut out = [0u8; 64];
             conn.write_greeting(&mut out).unwrap();
             conn.feed(&plain_dish_greeting()).unwrap();
-            conn.write_greeting_rest(&mut out).unwrap();
             let hello = hello_frame(b"u", b"p");
             conn.feed(hello.as_slice()).unwrap();
 
@@ -1103,7 +976,6 @@ mod tests {
             let mut out = [0u8; 64];
             conn.write_greeting(&mut out).unwrap();
             conn.feed(&plain_dish_greeting()).unwrap();
-            conn.write_greeting_rest(&mut out).unwrap();
             let hello = hello_frame(b"u", b"p");
             conn.feed(hello.as_slice()).unwrap();
             assert_eq!(conn.state(), &State::PlainReady);

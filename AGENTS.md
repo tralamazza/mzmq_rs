@@ -1,10 +1,15 @@
+Run `brew list --formula`
+
 # Guidelines
 
 ## Dev environment tips
-- Run `brew list --formula` to display available tools and libraries.
-- Run `cargo clippy --all-targets --all-features` before committing.
-- Check code coverage with `cargo llvm-cov --all-features`.
+- Verify code changes with `cargo clippy --all-targets --all-features`.
+- Use `scripts/coverage-table.sh` for unit test coverage report.
+- Use `scripts/measure_size.sh` for a binary size report.
 - Find the CI plans in the .github/workflows folder.
+- Use `ast-grep` for code exploration and manipulation.
+- Use `rg` instead of grep.
+- Use `gh` for github operations.
 
 ## Conventions
 - Don't hide confusion.

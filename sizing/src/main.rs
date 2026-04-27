@@ -46,7 +46,6 @@ fn probe() {
     let mut conn: Connection<8, 32, 512> = Connection::new();
     let _ = black_box(conn.write_greeting(&mut buf));
     let _ = black_box(conn.feed(black_box(&buf)));
-    let _ = black_box(conn.write_greeting_rest(&mut buf));
     let _ = black_box(conn.write_ready(&mut buf));
     let _ = black_box(conn.publish(black_box(b"t"), black_box(b"p"), &mut buf));
     let _ = black_box(conn.write_error(&mut buf));
@@ -55,7 +54,6 @@ fn probe() {
     let mut radio: RadioConnection<8, 32, 512> = RadioConnection::new();
     let _ = black_box(radio.write_greeting(&mut buf));
     let _ = black_box(radio.feed(black_box(&buf)));
-    let _ = black_box(radio.write_greeting_rest(&mut buf));
     let _ = black_box(radio.write_ready(&mut buf));
     let _ = black_box(radio.publish(black_box(b"g"), black_box(b"p"), &mut buf));
 

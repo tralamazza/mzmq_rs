@@ -40,14 +40,9 @@ impl<const MAX_ENTRIES: usize, const MAX_PREFIX_LEN: usize> Default
 impl<const MAX_ENTRIES: usize, const MAX_PREFIX_LEN: usize> SubTable<MAX_ENTRIES, MAX_PREFIX_LEN> {
     /// Register a subscription prefix.
     ///
-    /// Returns `Err` if the table is full or the prefix exceeds `MAX_PREFIX_LEN`.
-    /// Silently succeeds (no duplicate added) if the prefix is already present.
-    ///
-    /// **RFC 37 deviation:** ZMTP 3.1 requires subscriptions to be additive and
-    /// not idempotent — two identical `SUBSCRIBE` frames should require two
-    /// `CANCEL` frames to fully unsubscribe. This implementation deduplicates to
-    /// conserve bounded table space on embedded targets; one `CANCEL` always
-    /// removes the prefix regardless of how many `SUBSCRIBE` frames were received.
+    /// Subscriptions are additive per RFC 37: two identical `SUBSCRIBE` frames
+    /// require two `CANCEL` frames to fully unsubscribe. Duplicate prefixes are
+    /// stored as separate entries in the table.
     ///
     /// # Panics
     /// Panics if `prefix.len() <= MAX_PREFIX_LEN` but the internal `Vec` fails to extend
@@ -59,12 +54,6 @@ impl<const MAX_ENTRIES: usize, const MAX_PREFIX_LEN: usize> SubTable<MAX_ENTRIES
     pub fn subscribe(&mut self, prefix: &[u8]) -> Result<(), SubError> {
         if prefix.len() > MAX_PREFIX_LEN {
             return Err(SubError::PrefixTooLong);
-        }
-        // Duplicate detection — skip if already present.
-        for entry in &self.entries {
-            if entry.as_slice() == prefix {
-                return Ok(());
-            }
         }
         let mut v: Vec<u8, MAX_PREFIX_LEN> = Vec::new();
         v.extend_from_slice(prefix)
@@ -200,11 +189,17 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_subscribe_does_not_add_twice() {
+    fn duplicate_subscribe_is_additive() {
         let mut table: SubTable<8, 16> = SubTable::new();
         table.subscribe(b"foo").unwrap();
         table.subscribe(b"foo").unwrap();
+        assert_eq!(table.len(), 2);
+        assert!(table.matches(b"foo"));
+        table.cancel(b"foo");
         assert_eq!(table.len(), 1);
         assert!(table.matches(b"foo"));
+        table.cancel(b"foo");
+        assert_eq!(table.len(), 0);
+        assert!(!table.matches(b"foo"));
     }
 }

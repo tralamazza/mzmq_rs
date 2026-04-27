@@ -136,11 +136,39 @@ pub fn parse_ready_radio(buf: &[u8]) -> Result<PeerSocketType, NullError> {
 /// Returns `NullError::UnknownCommand` if the command name is not "READY" or "ERROR".
 /// Returns `NullError::WrongSocketType` if the Socket-Type is not "SUB" or "XSUB".
 pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType, NullError> {
+    let val = parse_ready_command(is_command, body)?;
+    if val == b"SUB" {
+        return Ok(PeerSocketType::Sub);
+    } else if val == b"XSUB" {
+        return Ok(PeerSocketType::Xsub);
+    }
+    Err(NullError::WrongSocketType)
+}
+
+/// Parse a RADIO/DISH READY (or ERROR) command from structured frame data.
+/// `is_command` must be true. `body` is the frame body.
+///
+/// # Errors
+/// Returns `NullError::NotACommand` if `is_command` is false.
+/// Returns `NullError::MalformedMetadata` if the body is too short or structurally invalid.
+/// Returns `NullError::PeerError` if the command name is "ERROR".
+/// Returns `NullError::UnknownCommand` if the command name is not "READY" or "ERROR".
+/// Returns `NullError::WrongSocketType` if the Socket-Type is not "DISH".
+pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType, NullError> {
+    let val = parse_ready_command(is_command, body)?;
+    if val == b"DISH" {
+        return Ok(PeerSocketType::Dish);
+    }
+    Err(NullError::WrongSocketType)
+}
+
+/// Parse a READY command frame: validate the frame, parse command name, and return
+/// the Socket-Type property value slice. Returns `Err` if the frame is invalid.
+fn parse_ready_command(is_command: bool, body: &[u8]) -> Result<&[u8], NullError> {
     if !is_command {
         return Err(NullError::NotACommand);
     }
 
-    // Parse command name: name-size (1 byte) + name bytes
     if body.is_empty() {
         return Err(NullError::MalformedMetadata);
     }
@@ -160,10 +188,6 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
     // Parse metadata: sequence of (name-size, name, value-size-4BE, value)
     let mut pos = 1 + name_len;
     while pos < body.len() {
-        // prop name-size
-        if pos >= body.len() {
-            break;
-        }
         let prop_name_len = body[pos] as usize;
         pos += 1;
         if pos + prop_name_len > body.len() {
@@ -172,7 +196,6 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
         let prop_name = &body[pos..pos + prop_name_len];
         pos += prop_name_len;
 
-        // value-size (4 bytes BE)
         if pos + 4 > body.len() {
             return Err(NullError::MalformedMetadata);
         }
@@ -187,79 +210,11 @@ pub fn parse_ready_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType,
 
         // Case-insensitive compare for "Socket-Type" (RFC 23 §7.3)
         if prop_name_len == 11 && prop_name.eq_ignore_ascii_case(b"Socket-Type") {
-            if val == b"SUB" {
-                return Ok(PeerSocketType::Sub);
-            } else if val == b"XSUB" {
-                return Ok(PeerSocketType::Xsub);
-            }
-            return Err(NullError::WrongSocketType);
+            return Ok(val);
         }
     }
 
     // RFC 37: Socket-Type SHOULD be specified. Absent = unrecognised peer type.
-    Err(NullError::WrongSocketType)
-}
-
-/// Parse a RADIO/DISH READY (or ERROR) command from structured frame data.
-/// `is_command` must be true. `body` is the frame body.
-///
-/// # Errors
-/// Returns `NullError::NotACommand` if `is_command` is false.
-/// Returns `NullError::MalformedMetadata` if the body is too short or structurally invalid.
-/// Returns `NullError::PeerError` if the command name is "ERROR".
-/// Returns `NullError::UnknownCommand` if the command name is not "READY" or "ERROR".
-/// Returns `NullError::WrongSocketType` if the Socket-Type is not "DISH".
-pub fn parse_ready_radio_from(is_command: bool, body: &[u8]) -> Result<PeerSocketType, NullError> {
-    if !is_command {
-        return Err(NullError::NotACommand);
-    }
-
-    if body.is_empty() {
-        return Err(NullError::MalformedMetadata);
-    }
-    let name_len = body[0] as usize;
-    if body.len() < 1 + name_len {
-        return Err(NullError::MalformedMetadata);
-    }
-    let name = &body[1..=name_len];
-
-    if name == b"ERROR" {
-        return Err(NullError::PeerError);
-    }
-    if name != b"READY" {
-        return Err(NullError::UnknownCommand);
-    }
-
-    let mut pos = 1 + name_len;
-    while pos < body.len() {
-        let prop_name_len = body[pos] as usize;
-        pos += 1;
-        if pos + prop_name_len > body.len() {
-            return Err(NullError::MalformedMetadata);
-        }
-        let prop_name = &body[pos..pos + prop_name_len];
-        pos += prop_name_len;
-
-        if pos + 4 > body.len() {
-            return Err(NullError::MalformedMetadata);
-        }
-        let val_len =
-            u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
-        pos += 4;
-        if pos + val_len > body.len() {
-            return Err(NullError::MalformedMetadata);
-        }
-        let val = &body[pos..pos + val_len];
-        pos += val_len;
-
-        if prop_name_len == 11 && prop_name.eq_ignore_ascii_case(b"Socket-Type") {
-            if val == b"DISH" {
-                return Ok(PeerSocketType::Dish);
-            }
-            return Err(NullError::WrongSocketType);
-        }
-    }
-
     Err(NullError::WrongSocketType)
 }
 

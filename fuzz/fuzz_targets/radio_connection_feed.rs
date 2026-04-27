@@ -16,9 +16,6 @@ fuzz_target!(|data: &[u8]| {
         match conn.feed(remaining) {
             Ok(n) if n > 0 => {
                 remaining = &remaining[n..];
-                if conn.greeting_rest_pending() {
-                    let _ = conn.write_greeting_rest(&mut out);
-                }
                 let _ = conn.write_ready(&mut out);
             }
             _ => break,

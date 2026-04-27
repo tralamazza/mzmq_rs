@@ -18,8 +18,11 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 LLVM_SIZE="$(command -v llvm-size || true)"
+if [ -z "$LLVM_SIZE" ] && [ -x "/opt/homebrew/opt/llvm/bin/llvm-size" ]; then
+    LLVM_SIZE="/opt/homebrew/opt/llvm/bin/llvm-size"
+fi
 if [ -z "$LLVM_SIZE" ]; then
-    echo "error: llvm-size not found on PATH; install llvm (e.g. brew install llvm) and ensure its bin dir is on PATH" >&2
+    echo "error: llvm-size not found on PATH; install llvm (e.g. brew install llvm) and ensure its bin dir is on PATH, or use /opt/homebrew/opt/llvm/bin" >&2
     exit 1
 fi
 
