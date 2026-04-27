@@ -1,6 +1,9 @@
+//! Asynchronous IO adapter for `Connection` and `RadioConnection`.
+
 use crate::auth::AuthCheck;
-use crate::connection::{ConnError, Connection};
-use crate::io::core::{Action, DriverCore, RadioDriverCore};
+use crate::connection::{ConnError, Connection, State};
+#[cfg(feature = "plain")]
+use crate::plain::WELCOME_LEN;
 use embedded_io_async::{Error, Read, Write};
 
 /// Async driver for a ZMTP 3.1 PUB [`Connection`].
@@ -21,8 +24,10 @@ pub struct Driver<
     T,
     A: AuthCheck = (),
 > {
-    core: DriverCore<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>,
+    conn: Connection<SUB_CAP, PREFIX_CAP, FRAME_CAP, A>,
     transport: T,
+    rx_buf: [u8; 512],
+    rx_len: usize,
 }
 
 impl<const SUB_CAP: usize, const PREFIX_CAP: usize, const FRAME_CAP: usize, T>
@@ -46,8 +51,10 @@ where
             .map_err(|e| ConnError::IoError(e.kind() as usize))?;
 
         Ok(Self {
-            core: DriverCore::new_null(conn),
+            conn,
             transport,
+            rx_buf: [0u8; 512],
+            rx_len: 0,
         })
     }
 }
@@ -79,8 +86,10 @@ where
             .map_err(|e| ConnError::IoError(e.kind() as usize))?;
 
         Ok(Self {
-            core: DriverCore::new_plain(conn),
+            conn,
             transport,
+            rx_buf: [0u8; 512],
+            rx_len: 0,
         })
     }
 }
@@ -98,29 +107,108 @@ where
     /// Returns `ConnError::WrongState` if the connection is in an invalid state.
     /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub async fn poll(&mut self) -> Result<bool, ConnError> {
-        let io_err =
-            |e: <T as embedded_io_async::ErrorType>::Error| ConnError::IoError(e.kind() as usize);
-        loop {
-            match self.core.step()? {
-                Action::Write(bytes) => {
-                    self.transport.write_all(bytes).await.map_err(io_err)?;
-                }
-                Action::Read => {
-                    let n = self
-                        .transport
-                        .read(self.core.rx_slot())
+        if *self.conn.state() == State::Ready {
+            let mut ready = [0u8; 32];
+            match self.conn.write_ready(&mut ready) {
+                Ok(n) => {
+                    self.transport
+                        .write_all(&ready[..n])
                         .await
-                        .map_err(io_err)?;
-                    if n == 0 {
-                        return Err(ConnError::IoError(0));
-                    }
-                    self.core.advance_rx(n);
-                    return Ok(self.core.is_established());
+                        .map_err(|e| ConnError::IoError(e.kind() as usize))?;
+                    return Ok(false);
                 }
-                Action::Parked => return Ok(false),
-                Action::Established => return Ok(true),
+                Err(ConnError::WrongState) => {}
+                Err(e) => return Err(e),
             }
         }
+
+        if self.rx_len > 0 {
+            let prev_rx_len = self.rx_len;
+            self.drain_buffer().await?;
+            if self.rx_len < prev_rx_len {
+                return Ok(*self.conn.state() == State::Established);
+            }
+        }
+
+        match self.transport.read(&mut self.rx_buf[self.rx_len..]).await {
+            Ok(0) => Err(ConnError::IoError(0)),
+            Ok(n) => {
+                self.rx_len += n;
+                self.drain_buffer().await?;
+                Ok(*self.conn.state() == State::Established)
+            }
+            Err(e) => Err(ConnError::IoError(e.kind() as usize)),
+        }
+    }
+
+    async fn drain_buffer(&mut self) -> Result<(), ConnError> {
+        let io_err =
+            |e: <T as embedded_io_async::ErrorType>::Error| ConnError::IoError(e.kind() as usize);
+        let mut total_consumed = 0;
+        while total_consumed < self.rx_len {
+            let prev_state = *self.conn.state();
+            match self.conn.feed(&self.rx_buf[total_consumed..self.rx_len]) {
+                Ok(consumed) => {
+                    total_consumed += consumed;
+
+                    match (prev_state, self.conn.state()) {
+                        (State::Greeting, State::Ready) => {
+                            let mut ready = [0u8; 32];
+                            let n = self.conn.write_ready(&mut ready)?;
+                            self.transport
+                                .write_all(&ready[..n])
+                                .await
+                                .map_err(io_err)?;
+                            break;
+                        }
+                        #[cfg(feature = "plain")]
+                        (State::PlainHello, State::PlainReady) => {
+                            let mut welcome = [0u8; WELCOME_LEN];
+                            let n = self.conn.write_welcome(&mut welcome)?;
+                            self.transport
+                                .write_all(&welcome[..n])
+                                .await
+                                .map_err(io_err)?;
+                            let mut ready = [0u8; 32];
+                            let n = self.conn.write_ready(&mut ready)?;
+                            self.transport
+                                .write_all(&ready[..n])
+                                .await
+                                .map_err(io_err)?;
+                            break;
+                        }
+                        _ => {}
+                    }
+
+                    let mut pong_buf = [0u8; 23];
+                    if let Some(n) = self.conn.write_pong(&mut pong_buf)? {
+                        self.transport
+                            .write_all(&pong_buf[..n])
+                            .await
+                            .map_err(io_err)?;
+                    }
+
+                    if consumed == 0 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if *self.conn.state() == State::Failed {
+                        let mut err_buf = [0u8; 32];
+                        if let Ok(n) = self.conn.write_error(&mut err_buf) {
+                            let _ = self.transport.write_all(&err_buf[..n]).await;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        if total_consumed > 0 {
+            self.rx_buf.copy_within(total_consumed..self.rx_len, 0);
+            self.rx_len -= total_consumed;
+        }
+        Ok(())
     }
 
     /// Publish a message. Returns 0 if no peer subscription matches.
@@ -130,7 +218,7 @@ where
     /// Returns `ConnError::IoError` if the transport write fails.
     /// Returns `ConnError::FrameError` if the frame headers cannot be encoded.
     pub async fn publish(&mut self, topic: &[u8], payload: &[u8]) -> Result<usize, ConnError> {
-        let Some((th, th_n, ph, ph_n)) = self.core.publish_headers(topic, payload)? else {
+        let Some((th, th_n, ph, ph_n)) = self.conn.publish_headers(topic, payload)? else {
             return Ok(0);
         };
         let io_err =
@@ -152,7 +240,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::State;
     use crate::test_helpers::{
         async_mock::MockTransport, pub_ready, sub_greeting, sub_ready, sub_subscribe,
     };
@@ -169,6 +256,36 @@ mod tests {
         }
     }
     impl embedded_io_async::Write for ReadErrorTransport {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            Ok(buf.len())
+        }
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    struct ChunkedReadTransport {
+        data: alloc::vec::Vec<u8>,
+        pos: usize,
+    }
+
+    impl embedded_io_async::ErrorType for ChunkedReadTransport {
+        type Error = embedded_io_async::ErrorKind;
+    }
+    impl embedded_io_async::Read for ChunkedReadTransport {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = self.data[self.pos];
+            self.pos += 1;
+            Ok(1)
+        }
+    }
+    impl embedded_io_async::Write for ChunkedReadTransport {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
             Ok(buf.len())
         }
@@ -229,7 +346,7 @@ mod tests {
         }
 
         assert!(established);
-        assert_eq!(*driver.core.conn().state(), State::Established);
+        assert_eq!(*driver.conn.state(), State::Established);
 
         let written = driver.transport.written();
         assert!(written.len() >= 64 + 27);
@@ -319,36 +436,6 @@ mod tests {
         assert_eq!(written[91], 0x04);
     }
 
-    struct ChunkedReadTransport {
-        data: alloc::vec::Vec<u8>,
-        pos: usize,
-    }
-
-    impl embedded_io_async::ErrorType for ChunkedReadTransport {
-        type Error = embedded_io_async::ErrorKind;
-    }
-    impl embedded_io_async::Read for ChunkedReadTransport {
-        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            if self.pos >= self.data.len() {
-                return Ok(0);
-            }
-            if buf.is_empty() {
-                return Ok(0);
-            }
-            buf[0] = self.data[self.pos];
-            self.pos += 1;
-            Ok(1)
-        }
-    }
-    impl embedded_io_async::Write for ChunkedReadTransport {
-        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-            Ok(buf.len())
-        }
-        async fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn driver_chunked_read_completes_handshake() {
         let mut peer_bytes = alloc::vec::Vec::new();
@@ -362,14 +449,13 @@ mod tests {
         .await
         .unwrap();
         while !driver.poll().await.unwrap() {}
-        assert_eq!(*driver.core.conn().state(), State::Established);
+        assert_eq!(*driver.conn.state(), State::Established);
     }
 }
 
 #[cfg(all(test, feature = "plain"))]
 mod plain_driver_tests {
     use super::*;
-    use crate::connection::State;
     use crate::test_helpers::{
         async_mock::MockTransport, plain_hello, plain_sub_greeting, pub_ready, sub_ready,
         sub_subscribe,
@@ -429,7 +515,7 @@ mod plain_driver_tests {
     #[tokio::test]
     async fn plain_driver_completes_handshake() {
         let driver = make_plain_established(None).await;
-        assert_eq!(*driver.core.conn().state(), State::Established);
+        assert_eq!(*driver.conn.state(), State::Established);
     }
 
     #[tokio::test]
@@ -502,8 +588,10 @@ pub struct RadioDriver<
     const FRAME_CAP: usize,
     T,
 > {
-    core: RadioDriverCore<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP>,
+    conn: crate::radio_connection::RadioConnection<GROUP_CAP, GROUP_LEN_CAP, FRAME_CAP>,
     transport: T,
+    rx_buf: [u8; 512],
+    rx_len: usize,
 }
 
 impl<const GROUP_CAP: usize, const GROUP_LEN_CAP: usize, const FRAME_CAP: usize, T>
@@ -527,8 +615,10 @@ where
             .map_err(|e| crate::radio_connection::ConnError::IoError(e.kind() as usize))?;
 
         Ok(Self {
-            core: RadioDriverCore::new(conn),
+            conn,
             transport,
+            rx_buf: [0u8; 512],
+            rx_len: 0,
         })
     }
 
@@ -540,30 +630,94 @@ where
     /// Returns `ConnError::WrongState` if the connection is in an invalid state.
     /// Returns other `ConnError` variants if the handshake or frame processing fails.
     pub async fn poll(&mut self) -> Result<bool, crate::radio_connection::ConnError> {
-        let io_err = |e: <T as embedded_io_async::ErrorType>::Error| {
-            crate::radio_connection::ConnError::IoError(e.kind() as usize)
-        };
-        loop {
-            match self.core.step()? {
-                Action::Write(bytes) => {
-                    self.transport.write_all(bytes).await.map_err(io_err)?;
+        use crate::radio_connection::State;
+
+        if *self.conn.state() == State::Ready {
+            let mut ready = [0u8; 32];
+            match self.conn.write_ready(&mut ready) {
+                Ok(n) => {
+                    self.transport.write_all(&ready[..n]).await.map_err(|e| {
+                        crate::radio_connection::ConnError::IoError(e.kind() as usize)
+                    })?;
+                    return Ok(false);
                 }
-                Action::Read => {
-                    let n = self
-                        .transport
-                        .read(self.core.rx_slot())
-                        .await
-                        .map_err(io_err)?;
-                    if n == 0 {
-                        return Err(crate::radio_connection::ConnError::IoError(0));
-                    }
-                    self.core.advance_rx(n);
-                    return Ok(self.core.is_established());
-                }
-                Action::Parked => return Ok(false),
-                Action::Established => return Ok(true),
+                Err(crate::radio_connection::ConnError::WrongState) => {}
+                Err(e) => return Err(e),
             }
         }
+
+        if self.rx_len > 0 {
+            self.drain_buffer().await?;
+            return Ok(*self.conn.state() == State::Established);
+        }
+
+        match self.transport.read(&mut self.rx_buf[self.rx_len..]).await {
+            Ok(0) => Err(crate::radio_connection::ConnError::IoError(0)),
+            Ok(n) => {
+                self.rx_len += n;
+                self.drain_buffer().await?;
+                Ok(*self.conn.state() == State::Established)
+            }
+            Err(e) => Err(crate::radio_connection::ConnError::IoError(
+                e.kind() as usize
+            )),
+        }
+    }
+
+    async fn drain_buffer(&mut self) -> Result<(), crate::radio_connection::ConnError> {
+        use crate::radio_connection::State;
+
+        let mut total_consumed = 0;
+        while total_consumed < self.rx_len {
+            let was_ready_before = *self.conn.state() == State::Ready;
+            match self.conn.feed(&self.rx_buf[total_consumed..self.rx_len]) {
+                Ok(consumed) => {
+                    total_consumed += consumed;
+
+                    if *self.conn.state() == State::Ready && !was_ready_before {
+                        let mut ready = [0u8; 32];
+                        match self.conn.write_ready(&mut ready) {
+                            Ok(n) => {
+                                self.transport.write_all(&ready[..n]).await.map_err(|e| {
+                                    crate::radio_connection::ConnError::IoError(e.kind() as usize)
+                                })?;
+                                break;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+
+                    let mut pong_buf = [0u8; 23];
+                    if let Some(n) = self.conn.write_pong(&mut pong_buf)? {
+                        self.transport
+                            .write_all(&pong_buf[..n])
+                            .await
+                            .map_err(|e| {
+                                crate::radio_connection::ConnError::IoError(e.kind() as usize)
+                            })?;
+                    }
+
+                    if consumed == 0 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if *self.conn.state() == State::Failed {
+                        let mut err_buf = [0u8; 32];
+                        if let Ok(n) = self.conn.write_error(&mut err_buf) {
+                            let _ = self.transport.write_all(&err_buf[..n]).await;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        if total_consumed > 0 {
+            self.rx_buf.copy_within(total_consumed..self.rx_len, 0);
+            self.rx_len -= total_consumed;
+        }
+        Ok(())
     }
 
     /// Publish a message to the group. Returns 0 if the peer has not joined the group.
@@ -577,7 +731,7 @@ where
         group: &[u8],
         body: &[u8],
     ) -> Result<usize, crate::radio_connection::ConnError> {
-        let Some((gh, gh_n, bh, bh_n)) = self.core.publish_headers(group, body)? else {
+        let Some((gh, gh_n, bh, bh_n)) = self.conn.publish_headers(group, body)? else {
             return Ok(0);
         };
         let io_err = |e: <T as embedded_io_async::ErrorType>::Error| {
@@ -707,7 +861,7 @@ mod radio_tests {
 
         assert!(established);
         assert_eq!(
-            *driver.core.conn().state(),
+            *driver.conn.state(),
             crate::radio_connection::State::Established
         );
 
@@ -809,7 +963,7 @@ mod radio_tests {
         .unwrap();
         while !driver.poll().await.unwrap() {}
         assert_eq!(
-            *driver.core.conn().state(),
+            *driver.conn.state(),
             crate::radio_connection::State::Established
         );
     }
